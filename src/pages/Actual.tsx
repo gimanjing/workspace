@@ -260,7 +260,7 @@ export default function Actual() {
           <div className="max-w-7xl mx-auto space-y-6">
             <Card>
               <CardHeader>
-                <CardTitle>Actual — Upload & Import</CardTitle>
+                <CardTitle>modaro sak bojone — Upload & Import</CardTitle>
               </CardHeader>
               <CardContent className="space-y-4">
                 <div className="flex flex-wrap items-end gap-4">
