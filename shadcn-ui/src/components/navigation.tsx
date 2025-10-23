@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
-import { Home, TrendingUp, Calendar, ChevronRight, Pin, PinOff, RefreshCw } from 'lucide-react';
+import { Home, TrendingUp, Calendar, ChevronRight, Pin, PinOff, RefreshCw, CheckSquare, Monitor } from 'lucide-react';
 import { toast } from 'sonner';
 
 export function Navigation() {
@@ -14,6 +14,8 @@ export function Navigation() {
     { path: '/', label: 'Master Data', icon: Home },
     { path: '/forecast', label: 'Forecast', icon: TrendingUp },
     { path: '/calendar-master', label: 'Calendar Master', icon: Calendar },
+    { path: '/actual', label: 'Actual', icon: CheckSquare },
+    { path: '/monitoring', label: 'Monitoring', icon: Monitor },
   ];
 
   const handleMouseEnter = () => {

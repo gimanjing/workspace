@@ -6,6 +6,8 @@ import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import Index from './pages/Index';
 import Forecast from './pages/Forecast';
 import CalendarMaster from './pages/CalendarMaster';
+import Actual from './pages/Actual';
+import Monitoring from './pages/Monitoring';
 import NotFound from './pages/NotFound';
 
 const queryClient = new QueryClient();
@@ -20,6 +22,8 @@ const App = () => (
             <Route path="/" element={<Index />} />
             <Route path="/forecast" element={<Forecast />} />
             <Route path="/calendar-master" element={<CalendarMaster />} />
+            <Route path="/actual" element={<Actual />} />
+            <Route path="/monitoring" element={<Monitoring />} />
             <Route path="*" element={<NotFound />} />
           </Routes>
         </BrowserRouter>

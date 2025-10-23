@@ -29,7 +29,7 @@ function monthRange(y: number, m1to12: number) {
 /** Try seeding a table for a month if RPC exists. Silently continue if RPC missing. */
 async function trySeed(tableNo: 1 | 2, y: number, m1to12: number) {
   const fn = tableNo === 1 ? "calender1_seed_month" : "calender2_seed_month";
-  const { error } = await supabase.rpc(fn as any, { p_year: y, p_month: m1to12 });
+  const { error } = await supabase.rpc(fn as "calender1_seed_month" | "calender2_seed_month", { p_year: y, p_month: m1to12 });
   if (error) {
     // If the RPC is missing / not defined, just ignore. Otherwise surface real errors.
     const msg = (error.message || "").toLowerCase();
@@ -100,8 +100,9 @@ function EditableNumberCell({
       setSaving(true);
       await onSave(parsed);
       toast.success("Saved");
-    } catch (e: any) {
-      toast.error(e?.message ?? "Failed to save");
+    } catch (e: unknown) {
+      const errorMessage = e instanceof Error ? e.message : "Failed to save";
+      toast.error(errorMessage);
       setText(String(value));
     } finally {
       setSaving(false);
