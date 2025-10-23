@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { Navigation } from "@/components/navigation";
 import { Button } from "@/components/ui/button";
@@ -9,26 +9,32 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 
-/** DB row shape */
+/* ---------- Types ---------- */
 type ActualRow = {
   no_mat: string;
   dept: string | null;
   quantity: number | null;
-  posting_date: string;   // YYYY-MM-DD
-  document_date: string;  // YYYY-MM-DD
+  posting_date: string;
+  document_date: string;
 };
 
-type MasterRow = { no_mat: string; dept?: string | null };
+type MasterRow = {
+  no_mat: string;
+  mat_name: string;
+  category: string;
+  qty: number | null;
+  price: number | null;
+  uom: string;
+  created_at?: string;
+  updated_at?: string;
+};
 
-/* ---------- Excel / CSV parsing helpers ---------- */
-
+/* ---------- Excel parsing helpers ---------- */
 function normalizeHeader(h: string) {
   return h.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
-// support Excel serials if they sneak through
 function excelSerialToYmd(n: number) {
-  // Excel serial: days since 1899-12-30
   const ms = (n - 25569) * 86400000;
   const d = new Date(ms);
   if (isNaN(d.getTime())) return "";
@@ -51,7 +57,6 @@ function toYmd(v: string | number | null | undefined) {
     const day = String(d.getDate()).padStart(2, "0");
     return `${y}-${m}-${day}`;
   }
-  // last resort: try to parse dd/mm/yyyy
   const m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
   if (m) {
     const d = m[1].padStart(2, "0");
@@ -59,18 +64,16 @@ function toYmd(v: string | number | null | undefined) {
     const y = m[3].length === 2 ? `20${m[3]}` : m[3];
     return `${y}-${mo}-${d}`;
   }
-  return s; // may fail at DB if truly invalid
+  return s;
 }
 
 async function parseExcel(file: File): Promise<{ headers: string[]; rows: any[][] }> {
-  // dynamic CDN import – no npm install needed
   const XLSX = await import("https://esm.sh/xlsx@0.18.5");
   const buf = await file.arrayBuffer();
   const wb = XLSX.read(buf, { type: "array" });
   const wsName = wb.SheetNames[0];
   if (!wsName) return { headers: [], rows: [] };
   const ws = wb.Sheets[wsName];
-  // header:1 → array-of-arrays, raw:false gives formatted strings for dates
   const aoa: any[][] = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false });
   if (!aoa || aoa.length === 0) return { headers: [], rows: [] };
   const headers = (aoa[0] ?? []).map((h: any) => String(h ?? "").trim());
@@ -84,10 +87,6 @@ function chunk<T>(arr: T[], size = 500) {
   return out;
 }
 
-function monthStart(dateYmd: string) {
-  const [y, m] = dateYmd.split("-").map(Number);
-  return `${y}-${String(m).padStart(2, "0")}-01`;
-}
 function nextMonthStart(dateYmd: string) {
   const [y, m] = dateYmd.split("-").map(Number);
   const d = new Date(y, m - 1, 1);
@@ -96,20 +95,18 @@ function nextMonthStart(dateYmd: string) {
 }
 
 /* ---------- Page ---------- */
-
 export default function Actual() {
-  const [_now] = useState(useMemo(() => new Date(), [])); // keep for future filters
+  const [_now] = useState(useMemo(() => new Date(), []));
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<ActualRow[]>([]);
   const [missing, setMissing] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
 
-  // Fixed header mapping (case-insensitive):
-  // Material -> no_mat
-  // Cost Center -> dept
-  // Total Quantity -> quantity
-  // Posting Date -> posting_date
-  // Document Date -> document_date
+  // load missing on mount
+  useEffect(() => {
+    refreshMissingList();
+  }, []);
+
   function mapHeaders(headers: string[]) {
     const idx: Record<"material" | "cost center" | "total quantity" | "posting date" | "document date", number> = {
       "material": -1,
@@ -143,13 +140,7 @@ export default function Actual() {
 
       const required = ["material", "cost center", "total quantity", "posting date", "document date"] as const;
       const missingHdr = required.filter((k) => idx[k] === -1);
-      if (missingHdr.length) {
-        throw new Error(
-          `Missing columns in Excel: ${missingHdr.join(
-            ", "
-          )}. Found headers: ${headers.join(", ")}`
-        );
-      }
+      if (missingHdr.length) throw new Error(`Missing columns: ${missingHdr.join(", ")}`);
 
       const out: ActualRow[] = [];
       for (const r of rows) {
@@ -159,7 +150,6 @@ export default function Actual() {
         const qtyRaw = r[idx["total quantity"]];
         const postingRaw = r[idx["posting date"]];
         const docRaw = r[idx["document date"]];
-
         if (!material) continue;
 
         const quantity =
@@ -167,20 +157,10 @@ export default function Actual() {
         const posting_date = toYmd(postingRaw);
         const document_date = toYmd(docRaw);
 
-        out.push({
-          no_mat: material,
-          dept: dept || null,
-          quantity,
-          posting_date,
-          document_date,
-        });
+        out.push({ no_mat: material, dept: dept || null, quantity, posting_date, document_date });
       }
 
-      if (out.length === 0) {
-        toast.warning("No valid rows found.");
-      } else {
-        toast.success(`Loaded ${out.length} rows from ${f.name}`);
-      }
+      toast.success(`Loaded ${out.length} rows from ${f.name}`);
       setPreview(out);
     } catch (err: any) {
       console.error(err);
@@ -195,16 +175,13 @@ export default function Actual() {
     }
     setBusy(true);
     try {
-      // Determine unique months from posting_date (fallback to document_date if empty)
       const months = new Set<string>();
       for (const r of preview) {
         const base = r.posting_date || r.document_date;
         if (!base || !/^\d{4}-\d{2}-\d{2}$/.test(base)) continue;
-        const ym = base.slice(0, 7); // YYYY-MM
-        months.add(ym);
+        months.add(base.slice(0, 7));
       }
 
-      // Purge old data for EACH month (posting_date in that month)
       for (const ym of months) {
         const start = `${ym}-01`;
         const next = nextMonthStart(start);
@@ -216,26 +193,13 @@ export default function Actual() {
         if (delErr) throw new Error(`Purge ${ym} failed: ${delErr.message}`);
       }
 
-      // Insert new rows (chunked)
       for (const group of chunk(preview, 500)) {
         const { error } = await supabase.from("actual").insert(group);
         if (error) throw new Error(`Insert failed: ${error.message}`);
       }
 
-      // Check which no_mat are NOT in master
-      const uniqueMats = Array.from(new Set(preview.map((r) => r.no_mat)));
-      const present = new Set<string>();
-      for (const group of chunk(uniqueMats, 1000)) {
-        const { data, error } = await supabase.from("master").select("no_mat").in("no_mat", group);
-        if (error) throw new Error(`Master check failed: ${error.message}`);
-        (data ?? []).forEach((row: MasterRow) => present.add(row.no_mat));
-      }
-      const missingList = uniqueMats.filter((m) => !present.has(m));
-      setMissing(missingList);
-
-      toast.success(
-        `Imported ${preview.length} rows. Purged ${months.size} month(s). Missing in master: ${missingList.length}`
-      );
+      await refreshMissingList();
+      toast.success(`Imported ${preview.length} rows & refreshed missing list`);
     } catch (err: any) {
       console.error(err);
       toast.error(err?.message ?? "Import failed");
@@ -244,18 +208,42 @@ export default function Actual() {
     }
   }
 
-  async function addToMaster(no_mat: string, dept?: string) {
+  async function addToMaster(payload: MasterRow) {
     try {
-      const payload: MasterRow = { no_mat, dept: (dept ?? "").trim() || null };
-      const { error } = await supabase.from("master").insert(payload);
+      const now = new Date().toISOString();
+      const { error } = await supabase.from("master").insert({
+        ...payload,
+        created_at: now,
+        updated_at: now,
+      });
       if (error) throw new Error(error.message);
-      setMissing((prev) => prev.filter((m) => m !== no_mat));
-      toast.success(`Added ${no_mat} to master`);
+      setMissing((prev) => prev.filter((m) => m !== payload.no_mat));
+      toast.success(`Added ${payload.no_mat} to master`);
     } catch (e: any) {
-      toast.error(e?.message ?? "Failed to add to master");
+      toast.error(e?.message ?? "Insert failed");
     }
   }
 
+  async function refreshMissingList() {
+    try {
+      const { data: actualData, error: err1 } = await supabase.from("actual").select("no_mat");
+      if (err1) throw err1;
+      const { data: masterData, error: err2 } = await supabase.from("master").select("no_mat");
+      if (err2) throw err2;
+
+      const masterSet = new Set(masterData.map((m) => m.no_mat));
+      const missingList = Array.from(new Set(actualData.map((a) => a.no_mat))).filter(
+        (x) => !masterSet.has(x)
+      );
+
+      setMissing(missingList);
+      toast.success(`Missing list refreshed — ${missingList.length} item(s)`);
+    } catch (e: any) {
+      toast.error(e?.message ?? "Failed to refresh list");
+    }
+  }
+
+  /* ---------- JSX ---------- */
   return (
     <div className="min-h-dvh grid grid-cols-[260px_1fr]">
       <aside className="border-r bg-white dark:bg-slate-900 sticky top-0 h-dvh overflow-y-auto">
@@ -276,29 +264,23 @@ export default function Actual() {
                     <Input
                       id="file"
                       type="file"
-                      accept=".xlsx,.xls,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                      accept=".xlsx,.xls"
                       onChange={handleFile}
                       className="w-80"
                     />
                   </div>
-
                   <Button variant="outline" onClick={() => { setFile(null); setPreview([]); setMissing([]); }}>
                     Clear
                   </Button>
-
                   <Button onClick={importNow} disabled={!preview.length || busy}>
                     {busy ? "Importing…" : "Purge month(s) & Import"}
                   </Button>
-
-                  <div className="text-xs text-slate-500">
-                    We will purge old rows by <code>posting_date</code> month(s) present in this file, then insert the new rows.
-                  </div>
                 </div>
 
                 {preview.length > 0 && (
                   <div className="space-y-2">
                     <div className="text-sm text-slate-600 dark:text-slate-300">
-                      Prepared <b>{preview.length}</b> rows from <b>{file?.name}</b>. Showing first 20:
+                      Prepared <b>{preview.length}</b> rows. Showing first 20:
                     </div>
                     <div className="border rounded-lg overflow-auto max-h-[50vh]">
                       <table className="w-full text-sm">
@@ -330,20 +312,27 @@ export default function Actual() {
             </Card>
 
             <Card>
-              <CardHeader>
+              <CardHeader className="flex items-center justify-between">
                 <CardTitle>Materials missing in master</CardTitle>
+                <Button size="sm" variant="outline" onClick={refreshMissingList}>
+                  Refresh Missing List
+                </Button>
               </CardHeader>
               <CardContent>
                 {missing.length === 0 ? (
-                  <div className="text-sm text-slate-500">No missing items. Import some data first.</div>
+                  <div className="text-sm text-slate-500">No missing items. Import or refresh data first.</div>
                 ) : (
                   <div className="border rounded-lg overflow-auto max-h-[60vh]">
                     <table className="w-full text-sm">
                       <thead className="sticky top-0 bg-slate-50 dark:bg-slate-900">
                         <tr>
-                          <th className="px-3 py-2 text-left w-64">no_mat</th>
-                          <th className="px-3 py-2 text-left w-64">dept (optional)</th>
-                          <th className="px-3 py-2 text-left w-40">Action</th>
+                          <th className="px-3 py-2 text-left w-40">no_mat</th>
+                          <th className="px-3 py-2 text-left w-64">mat_name</th>
+                          <th className="px-3 py-2 text-left w-48">category</th>
+                          <th className="px-3 py-2 text-right w-20">qty</th>
+                          <th className="px-3 py-2 text-right w-24">Price</th>
+                          <th className="px-3 py-2 text-left w-20">UoM</th>
+                          <th className="px-3 py-2 text-center w-32">Action</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -363,41 +352,65 @@ export default function Actual() {
   );
 }
 
-/* Row component for adding an item to master */
+/* ---------- MissingRow Component ---------- */
 function MissingRow({
   no_mat,
   onAdd,
 }: {
   no_mat: string;
-  onAdd: (no_mat: string, dept?: string) => Promise<void>;
+  onAdd: (payload: MasterRow) => Promise<void>;
 }) {
-  const [dept, setDept] = useState("");
+  const [mat_name, setMatName] = useState("");
+  const [category, setCategory] = useState("");
+  const [qty, setQty] = useState<number | null>(null);
+  const [price, setPrice] = useState<number | null>(null);
+  const [uom, setUom] = useState("");
   const [busy, setBusy] = useState(false);
+
   return (
     <tr className="border-t">
       <td className="px-3 py-2">{no_mat}</td>
       <td className="px-3 py-2">
+        <Input value={mat_name} onChange={(e) => setMatName(e.target.value)} placeholder="mat_name" />
+      </td>
+      <td className="px-3 py-2">
+        <Input value={category} onChange={(e) => setCategory(e.target.value)} placeholder="category" />
+      </td>
+      <td className="px-3 py-2">
         <Input
-          placeholder="dept (optional)"
-          value={dept}
-          onChange={(e) => setDept(e.target.value)}
-          className="w-64"
+          type="number"
+          value={qty ?? ""}
+          onChange={(e) => setQty(e.target.value ? Number(e.target.value) : null)}
+          placeholder="qty"
+          className="w-24 text-right"
         />
+      </td>
+      <td className="px-3 py-2">
+        <Input
+          type="number"
+          value={price ?? ""}
+          onChange={(e) => setPrice(e.target.value ? Number(e.target.value) : null)}
+          placeholder="Price"
+          className="w-28 text-right"
+        />
+      </td>
+      <td className="px-3 py-2">
+        <Input value={uom} onChange={(e) => setUom(e.target.value)} placeholder="UoM" className="w-24" />
       </td>
       <td className="px-3 py-2">
         <Button
           size="sm"
           disabled={busy}
           onClick={async () => {
+            setBusy(true);
             try {
-              setBusy(true);
-              await onAdd(no_mat, dept);
+              await onAdd({ no_mat, mat_name, category, qty, price, uom });
             } finally {
               setBusy(false);
             }
           }}
         >
-          {busy ? "Adding…" : "Add to master"}
+          {busy ? "Adding…" : "Add"}
         </Button>
       </td>
     </tr>
