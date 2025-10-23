@@ -212,7 +212,12 @@ export default function Actual() {
     try {
       const now = new Date().toISOString();
       const { error } = await supabase.from("master").insert({
-        ...payload,
+        no_mat: payload.no_mat,
+        mat_name: payload.mat_name,
+        category: payload.category,
+        qty: payload.qty,
+        Price: payload.Price,   // ✅ Capital P
+        UoM: payload.UoM,       // ✅ Capital U and M
         created_at: now,
         updated_at: now,
       });
@@ -364,7 +369,7 @@ function MissingRow({
   const [category, setCategory] = useState("");
   const [qty, setQty] = useState<number | null>(null);
   const [Price, setPrice] = useState<number | null>(null);
-  const [UoM, setUom] = useState("");
+  const [UoM, setUoM] = useState("");
   const [busy, setBusy] = useState(false);
 
   return (
@@ -388,14 +393,14 @@ function MissingRow({
       <td className="px-3 py-2">
         <Input
           type="number"
-          value={price ?? ""}
+          value={Price ?? ""}
           onChange={(e) => setPrice(e.target.value ? Number(e.target.value) : null)}
           placeholder="Price"
           className="w-28 text-right"
         />
       </td>
       <td className="px-3 py-2">
-        <Input value={uom} onChange={(e) => setUom(e.target.value)} placeholder="UoM" className="w-24" />
+        <Input value={UoM} onChange={(e) => setUoM(e.target.value)} placeholder="UoM" className="w-24" />
       </td>
       <td className="px-3 py-2">
         <Button
