@@ -23,8 +23,8 @@ type MasterRow = {
   mat_name: string;
   category: string;
   qty: number | null;
-  price: number | null;
-  uom: string;
+  Price: number | null;
+  UoM: string;
   created_at?: string;
   updated_at?: string;
 };
@@ -363,8 +363,8 @@ function MissingRow({
   const [mat_name, setMatName] = useState("");
   const [category, setCategory] = useState("");
   const [qty, setQty] = useState<number | null>(null);
-  const [price, setPrice] = useState<number | null>(null);
-  const [uom, setUom] = useState("");
+  const [Price, setPrice] = useState<number | null>(null);
+  const [UoM, setUom] = useState("");
   const [busy, setBusy] = useState(false);
 
   return (
@@ -404,7 +404,7 @@ function MissingRow({
           onClick={async () => {
             setBusy(true);
             try {
-              await onAdd({ no_mat, mat_name, category, qty, price, uom });
+              await onAdd({ no_mat, mat_name, category, qty, Price, UoM });
             } finally {
               setBusy(false);
             }
