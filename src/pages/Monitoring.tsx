@@ -9,10 +9,22 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem } from "@/components/ui/command";
 import { Button } from "@/components/ui/button";
-import { CalendarDays, ChevronsUpDown, Check } from "lucide-react";
+import { CalendarDays, ChevronsUpDown, Check, Eye, EyeOff } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { supabase } from "@/lib/supabase";
 
+// shadcn table (adjust path if your project uses a different export path)
+import {
+  Table,
+  TableBody,
+  TableCaption,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+
+// Charts
 import {
   ResponsiveContainer,
   BarChart, Bar,
@@ -31,8 +43,8 @@ interface ForecastRow { no_mat: string; shop: string | null; quantity: number }
 type DeptMode = "all" | "list" | "unassigned";
 type MaterialOpt = "all" | "Direct Material" | "Indirect Material" | "Unassigned";
 interface FilterState {
-  month: number; // 1..12
-  year: number;  // e.g., 2025
+  month: number;
+  year: number;
   deptMode: DeptMode;
   deptSelected?: string;
   material: MaterialOpt;
@@ -55,15 +67,14 @@ const MONTHS = [
    Date helpers
 ========================= */
 const fmtDate = (d: Date) => d.toISOString().slice(0, 10); // YYYY-MM-DD
-
 function monthRange(year: number, month: number) {
   const start = new Date(Date.UTC(year, month - 1, 1));
-  const end = new Date(Date.UTC(year, month, 0)); // last day
+  const end = new Date(Date.UTC(year, month, 0));
   return { start, end };
 }
 function listMonthDates(year: number, month: number): string[] {
   const { start, end } = monthRange(year, month);
-  const days = [];
+  const days: string[] = [];
   const cur = new Date(start);
   while (cur <= end) {
     days.push(fmtDate(cur));
@@ -71,26 +82,19 @@ function listMonthDates(year: number, month: number): string[] {
   }
   return days;
 }
-
 // Normalize odd date strings like "20225-09-01" or "20250901" to "YYYY-MM-DD"
 function normalizeDateString(x: any): string | null {
   if (!x) return null;
   const s = String(x);
-
-  // yyyy(-)mm(-)dd with possibly 5-digit year
   const m = s.match(/(\d{4,5})-(\d{2})-(\d{2})/);
   if (m) {
     const yyyy = m[1].slice(-4);
     return `${yyyy}-${m[2]}-${m[3]}`;
   }
-  // yyyymmdd
   const m2 = s.match(/^(\d{4})(\d{2})(\d{2})$/);
   if (m2) return `${m2[1]}-${m2[2]}-${m2[3]}`;
-
-  // Try generic
   const d = new Date(s);
   if (!Number.isNaN(d.getTime())) return d.toISOString().slice(0, 10);
-
   return null;
 }
 
@@ -115,6 +119,7 @@ export default function Actual() {
   });
 
   const [graphMode, setGraphMode] = useState<GraphMode>("Combination");
+  const [showDebug, setShowDebug] = useState<boolean>(false);
 
   // Dept options (shop.dept)
   const [deptOptions, setDeptOptions] = useState<string[]>([]);
@@ -144,19 +149,17 @@ export default function Actual() {
         supabase.from("shop").select("dept, loc"),
       ]);
       if (cancel) return;
-
       const mm: Record<string, MasterRow> = {};
       (m ?? []).forEach((r: any) => {
         if (!r.no_mat) return;
         mm[String(r.no_mat)] = {
           no_mat: String(r.no_mat),
           price: safeNumber(r.price),
-          quantity: Math.max(1, safeNumber(r.quantity, 1)), // avoid /0
+          quantity: Math.max(1, safeNumber(r.quantity, 1)),
           category: r.category ?? null,
         };
       });
       setMasterMap(mm);
-
       const sm: Record<string, number> = {};
       (s ?? []).forEach((r: any) => {
         const dept = (r.dept ?? "").trim();
@@ -180,12 +183,8 @@ export default function Actual() {
       const { start, end } = monthRange(filters.year, filters.month);
       const startStr = fmtDate(start);
       const endStr = fmtDate(end);
-
-      const q1 = supabase.from("calender1").select("date, working_time, over_time")
-        .gte("date", startStr).lte("date", endStr);
-      const q2 = supabase.from("calender2").select("date, working_time, over_time")
-        .gte("date", startStr).lte("date", endStr);
-
+      const q1 = supabase.from("calender1").select("date, working_time, over_time").gte("date", startStr).lte("date", endStr);
+      const q2 = supabase.from("calender2").select("date, working_time, over_time").gte("date", startStr).lte("date", endStr);
       const [{ data: c1 }, { data: c2 }] = await Promise.all([q1, q2]);
       if (cancel) return;
 
@@ -209,16 +208,10 @@ export default function Actual() {
         if (d) { map2[d] = w; tot2 += w; }
       });
 
-      // Fallback to uniform distribution if empty or zero totals
+      // fallback to uniform monthly spread if needed
       const monthDates = listMonthDates(filters.year, filters.month);
-      if (tot1 === 0) {
-        monthDates.forEach(d => { map1[d] = 1; });
-        tot1 = monthDates.length;
-      }
-      if (tot2 === 0) {
-        monthDates.forEach(d => { map2[d] = 1; });
-        tot2 = monthDates.length;
-      }
+      if (tot1 === 0) { monthDates.forEach(d => { map1[d] = 1; }); tot1 = monthDates.length; }
+      if (tot2 === 0) { monthDates.forEach(d => { map2[d] = 1; }); tot2 = monthDates.length; }
 
       setCal1(map1); setCal1Total(tot1);
       setCal2(map2); setCal2Total(tot2);
@@ -229,7 +222,6 @@ export default function Actual() {
   // Actual + Forecast for month
   const [actualRows, setActualRows] = useState<ActualRow[]>([]);
   const [forecastRows, setForecastRows] = useState<ForecastRow[]>([]);
-
   useEffect(() => {
     let cancel = false;
     (async () => {
@@ -241,9 +233,7 @@ export default function Actual() {
         .select("no_mat, posting_date, quantity, dept")
         .gte("posting_date", startStr).lte("posting_date", endStr);
 
-      // Forecast assumed monthly qty per (no_mat, shop)
-      const qf = supabase.from("forecast")
-        .select("no_mat, shop, quantity");
+      const qf = supabase.from("forecast").select("no_mat, shop, quantity");
 
       const [{ data: a }, { data: f }] = await Promise.all([qa, qf]);
       if (cancel) return;
@@ -252,11 +242,11 @@ export default function Actual() {
         const d = normalizeDateString(r.posting_date);
         return {
           no_mat: String(r.no_mat),
-          posting_date: d ?? "", // normalized
+          posting_date: d ?? "",
           quantity: safeNumber(r.quantity),
           dept: r.dept ?? null,
         };
-      }).filter((r: any) => !!r.posting_date));
+      }).filter(r => !!r.posting_date));
 
       setForecastRows((f ?? []).map((r: any) => ({
         no_mat: String(r.no_mat),
@@ -268,93 +258,135 @@ export default function Actual() {
   }, [filters.year, filters.month]);
 
   /* =========================
-     Filtering + Aggregation
+     Shared filters + helpers
   ========================= */
+  const deptSet = useMemo(() => new Set(deptOptions), [deptOptions]);
+
+  const isDeptAllowed = (rowDept: string | null, rowShop: string | null) => {
+    if (filters.deptMode === "all") return true;
+    if (filters.deptMode === "list") {
+      const target = (filters.deptSelected ?? "").trim();
+      return (rowDept ? rowDept.trim() === target : false) || (rowShop ? rowShop.trim() === target : false);
+    }
+    // unassigned
+    const v = (rowDept ?? rowShop ?? "").trim();
+    return v && !deptSet.has(v);
+  };
+
+  const isMaterialAllowed = (no_mat: string) => {
+    const m = masterMap[no_mat];
+    const cat = (m?.category ?? "").trim();
+    if (filters.material === "all") return true;
+    if (filters.material === "Unassigned") {
+      return !(cat === "Direct Material" || cat === "Indirect Material");
+    }
+    return cat === filters.material;
+  };
+
+  const vpu = (no_mat: string) => {
+    const m = masterMap[no_mat];
+    if (!m) return 0; // set to 1 temporarily if you want to see missing master items
+    return safeNumber(m.price) / Math.max(1, safeNumber(m.quantity, 1));
+  };
+
+  /* =========================
+     DEBUGGING TABLE DATA
+  ========================= */
+  // Filtered actual/forecast rows (no aggregation)
+  const filteredActual = useMemo(() => {
+    return actualRows.filter(r =>
+      isMaterialAllowed(r.no_mat) &&
+      isDeptAllowed(r.dept, null)
+    ).map(r => ({
+      posting_date: r.posting_date,
+      no_mat: r.no_mat,
+      dept: r.dept ?? "",
+      quantity: r.quantity,
+      value: Number((r.quantity * vpu(r.no_mat)).toFixed(2)),
+    }));
+  }, [actualRows, isDeptAllowed, isMaterialAllowed]);
+
+  const filteredForecast = useMemo(() => {
+    return forecastRows.filter(r =>
+      isMaterialAllowed(r.no_mat) &&
+      isDeptAllowed(null, r.shop)
+    ).map(r => ({
+      shop: r.shop ?? "",
+      loc: shopMap[(r.shop ?? "").trim()] ?? 1,
+      no_mat: r.no_mat,
+      quantity: r.quantity,
+      value: Number((r.quantity * vpu(r.no_mat)).toFixed(2)),
+    }));
+  }, [forecastRows, isDeptAllowed, isMaterialAllowed, shopMap]);
+
+  // Pagination state
+  const [pageA, setPageA] = useState(1);
+  const [pageF, setPageF] = useState(1);
+  const [pageSizeA, setPageSizeA] = useState(20);
+  const [pageSizeF, setPageSizeF] = useState(20);
+
+  useEffect(() => { setPageA(1); setPageF(1); }, [filters, filteredActual.length, filteredForecast.length]);
+
+  const pagedActual = useMemo(() => {
+    const start = (pageA - 1) * pageSizeA;
+    return filteredActual.slice(start, start + pageSizeA);
+  }, [filteredActual, pageA, pageSizeA]);
+
+  const pagedForecast = useMemo(() => {
+    const start = (pageF - 1) * pageSizeF;
+    return filteredForecast.slice(start, start + pageSizeF);
+  }, [filteredForecast, pageF, pageSizeF]);
+
+  const pagesA = Math.max(1, Math.ceil(filteredActual.length / pageSizeA));
+  const pagesF = Math.max(1, Math.ceil(filteredForecast.length / pageSizeF));
+
+  /* =========================
+     GRAPH AGGREGATION
+  ========================= */
+  const graphModeDates = useMemo(() => listMonthDates(filters.year, filters.month), [filters.year, filters.month]);
+
   const graphData = useMemo(() => {
-    const dates = listMonthDates(filters.year, filters.month);
-    const deptSet = new Set(deptOptions);
-
-    const isDeptAllowed = (rowDept: string | null, rowShop: string | null) => {
-      if (filters.deptMode === "all") return true;
-      if (filters.deptMode === "list") {
-        const target = (filters.deptSelected ?? "").trim();
-        return (rowDept ? rowDept.trim() === target : false) || (rowShop ? rowShop.trim() === target : false);
-      }
-      // unassigned
-      const v = (rowDept ?? rowShop ?? "").trim();
-      return v && !deptSet.has(v);
-    };
-
-    const isMaterialAllowed = (no_mat: string) => {
-      const m = masterMap[no_mat];
-      const cat = (m?.category ?? "").trim();
-      if (filters.material === "all") return true;
-      if (filters.material === "Unassigned") {
-        return !(cat === "Direct Material" || cat === "Indirect Material");
-      }
-      return cat === filters.material;
-    };
-
-    const vpu = (no_mat: string) => {
-      const m = masterMap[no_mat];
-      if (!m) return 0; // set to 1 temporarily for debugging if needed
-      return safeNumber(m.price) / Math.max(1, safeNumber(m.quantity, 1));
-    };
+    const dates = graphModeDates;
 
     // Actual per day
     const actualByDate: Record<string, number> = {};
     for (const d of dates) actualByDate[d] = 0;
-
-    actualRows.forEach(r => {
-      if (!isMaterialAllowed(r.no_mat)) return;
-      if (!isDeptAllowed(r.dept, null)) return;
-      const d = r.posting_date;
-      if (d in actualByDate) {
-        actualByDate[d] += r.quantity * vpu(r.no_mat);
+    filteredActual.forEach(r => {
+      if (r.posting_date in actualByDate) {
+        actualByDate[r.posting_date] += r.value;
       }
     });
 
-    // Forecast per day (distribute monthly forecast by calendar weights)
+    // Forecast per day via calendar
     const forecastByDate: Record<string, number> = {};
     for (const d of dates) forecastByDate[d] = 0;
 
-    forecastRows.forEach(r => {
-      if (!isMaterialAllowed(r.no_mat)) return;
-      if (!isDeptAllowed(null, r.shop)) return;
-
-      const dept = (r.shop ?? "").trim();
-      const loc = shopMap[dept] ?? 1;
+    filteredForecast.forEach(r => {
+      const loc = r.loc === 2 ? 2 : 1;
       const cal = loc === 2 ? cal2 : cal1;
       const total = loc === 2 ? cal2Total : cal1Total;
       const denom = total > 0 ? total : 1;
-
-      const totalValue = r.quantity * vpu(r.no_mat);
-
       dates.forEach(d => {
         const weight = cal[d] ?? 0;
-        const share = weight / denom;
-        forecastByDate[d] += totalValue * share;
+        forecastByDate[d] += r.value * (weight / denom);
       });
     });
 
-    // Build rows + cumulative
+    // Rows + cumulative
     let cumA = 0, cumF = 0;
-    const rows = dates.map((d) => {
+    return dates.map(d => {
       const a = actualByDate[d] || 0;
       const f = forecastByDate[d] || 0;
-      cumA += a;
-      cumF += f;
+      cumA += a; cumF += f;
       return {
-        date: d.slice(8, 10), // DD for x-axis
+        date: d.slice(8, 10),
         actual: Number(a.toFixed(2)),
         forecast: Number(f.toFixed(2)),
         cumActual: Number(cumA.toFixed(2)),
         cumForecast: Number(cumF.toFixed(2)),
       };
     });
-
-    return rows;
-  }, [filters, deptOptions, actualRows, forecastRows, masterMap, shopMap, cal1, cal2, cal1Total, cal2Total]);
+  }, [graphModeDates, filteredActual, filteredForecast, cal1, cal2, cal1Total, cal2Total]);
 
   /* =========================
      UI
@@ -378,6 +410,145 @@ export default function Actual() {
               </CardContent>
             </Card>
 
+            {/* Debug tables toggle */}
+            <div className="flex items-center justify-between">
+              <div className="text-sm text-muted-foreground">
+                Debugging: filtered data preview (forecast vs actual)
+              </div>
+              <div className="flex items-center gap-2">
+                <Label className="mr-2">Show tables</Label>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setShowDebug((s) => !s)}
+                  className="gap-2"
+                >
+                  {showDebug ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  {showDebug ? "Hide" : "Show"}
+                </Button>
+              </div>
+            </div>
+
+            {/* Debug tables */}
+            {showDebug && (
+              <Card>
+                <CardHeader>
+                  <CardTitle>Filtered Material — Debug</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    {/* Forecast */}
+                    <div className="min-w-0">
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="text-sm font-medium">Forecast ({filteredForecast.length})</div>
+                        <div className="flex items-center gap-2">
+                          <Label className="text-xs">Rows per page</Label>
+                          <Select value={String(pageSizeF)} onValueChange={(v) => { setPageSizeF(Number(v)); setPageF(1); }}>
+                            <SelectTrigger className="h-8 w-24"><SelectValue /></SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="10">10</SelectItem>
+                              <SelectItem value="20">20</SelectItem>
+                              <SelectItem value="50">50</SelectItem>
+                            </SelectContent>
+                          </Select>
+                          <div className="text-xs text-muted-foreground">
+                            Page {pageF} / {pagesF}
+                          </div>
+                          <div className="flex gap-2">
+                            <Button variant="outline" size="sm" onClick={() => setPageF(p => Math.max(1, p - 1))}>Prev</Button>
+                            <Button variant="outline" size="sm" onClick={() => setPageF(p => Math.min(pagesF, p + 1))}>Next</Button>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="rounded-lg border overflow-auto max-h-[360px]">
+                        <Table>
+                          <TableHeader>
+                            <TableRow>
+                              <TableHead>Shop</TableHead>
+                              <TableHead>Dept Loc</TableHead>
+                              <TableHead>No Mat</TableHead>
+                              <TableHead className="text-right">Qty</TableHead>
+                              <TableHead className="text-right">Value</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {pagedForecast.map((r, idx) => (
+                              <TableRow key={idx}>
+                                <TableCell>{r.shop}</TableCell>
+                                <TableCell>{r.loc}</TableCell>
+                                <TableCell className="font-mono">{r.no_mat}</TableCell>
+                                <TableCell className="text-right">{r.quantity}</TableCell>
+                                <TableCell className="text-right">{r.value.toLocaleString()}</TableCell>
+                              </TableRow>
+                            ))}
+                            {pagedForecast.length === 0 && (
+                              <TableRow>
+                                <TableCell colSpan={5} className="text-center text-sm text-muted-foreground">No data</TableCell>
+                              </TableRow>
+                            )}
+                          </TableBody>
+                        </Table>
+                      </div>
+                    </div>
+
+                    {/* Actual */}
+                    <div className="min-w-0">
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="text-sm font-medium">Actual ({filteredActual.length})</div>
+                        <div className="flex items-center gap-2">
+                          <Label className="text-xs">Rows per page</Label>
+                          <Select value={String(pageSizeA)} onValueChange={(v) => { setPageSizeA(Number(v)); setPageA(1); }}>
+                            <SelectTrigger className="h-8 w-24"><SelectValue /></SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="10">10</SelectItem>
+                              <SelectItem value="20">20</SelectItem>
+                              <SelectItem value="50">50</SelectItem>
+                            </SelectContent>
+                          </Select>
+                          <div className="text-xs text-muted-foreground">
+                            Page {pageA} / {pagesA}
+                          </div>
+                          <div className="flex gap-2">
+                            <Button variant="outline" size="sm" onClick={() => setPageA(p => Math.max(1, p - 1))}>Prev</Button>
+                            <Button variant="outline" size="sm" onClick={() => setPageA(p => Math.min(pagesA, p + 1))}>Next</Button>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="rounded-lg border overflow-auto max-h-[360px]">
+                        <Table>
+                          <TableHeader>
+                            <TableRow>
+                              <TableHead>Date</TableHead>
+                              <TableHead>Dept</TableHead>
+                              <TableHead>No Mat</TableHead>
+                              <TableHead className="text-right">Qty</TableHead>
+                              <TableHead className="text-right">Value</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {pagedActual.map((r, idx) => (
+                              <TableRow key={idx}>
+                                <TableCell className="font-mono">{r.posting_date}</TableCell>
+                                <TableCell>{r.dept}</TableCell>
+                                <TableCell className="font-mono">{r.no_mat}</TableCell>
+                                <TableCell className="text-right">{r.quantity}</TableCell>
+                                <TableCell className="text-right">{r.value.toLocaleString()}</TableCell>
+                              </TableRow>
+                            ))}
+                            {pagedActual.length === 0 && (
+                              <TableRow>
+                                <TableCell colSpan={5} className="text-center text-sm text-muted-foreground">No data</TableCell>
+                              </TableRow>
+                            )}
+                          </TableBody>
+                        </Table>
+                      </div>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
             {/* Graphs */}
             <Card>
               <CardHeader className="flex items-center justify-between gap-4">
@@ -398,7 +569,6 @@ export default function Actual() {
               </CardHeader>
               <CardContent className="space-y-4">
                 <GraphBlock mode={graphMode} data={graphData} />
-                {/* quick sanity footer; remove later */}
                 <div className="text-xs text-muted-foreground">
                   days: {graphData.length} • sumA: {graphData.reduce((s,r)=>s+r.actual,0).toFixed(2)} • sumF: {graphData.reduce((s,r)=>s+r.forecast,0).toFixed(2)}
                 </div>
@@ -484,7 +654,7 @@ function FiltersUI({
               value={filters.deptSelected}
               options={deptOptions}
               onSelect={(v) => setFilters(f => ({ ...f, deptSelected: v }))}
-              openState={[undefined, setDeptOpen]}
+              openState={[undefined as any, setDeptOpen]}
             />
           )}
         </div>
@@ -606,7 +776,6 @@ function GraphBlock({ mode, data }: { mode: GraphMode; data: any[] }) {
     );
   }
 
-  // Combination
   return (
     <div className="h-[460px]">
       <ResponsiveContainer width="100%" height="100%">
