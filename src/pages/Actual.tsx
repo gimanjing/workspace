@@ -8,12 +8,13 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { toast } from "sonner";
 
 /* ---------- Types ---------- */
 type ActualRow = {
   no_mat: string;
-  dept: string;                 // always a string now (mapped or "Unassigned")
+  dept: string;                 // mapped or "Unassigned"
   quantity: number | null;
   posting_date: string;
   document_date: string;
@@ -30,6 +31,12 @@ type MasterRow = {
   updated_at?: string;
 };
 
+type ShopRow = {
+  code: string;
+  dept: string;
+  loc: string | null;
+};
+
 /* ---------- Config ---------- */
 const DEFAULT_DEPT = "Unassigned";
 
@@ -37,7 +44,6 @@ const DEFAULT_DEPT = "Unassigned";
 function normalizeHeader(h: string) {
   return h.trim().toLowerCase().replace(/\s+/g, " ");
 }
-
 function excelSerialToYmd(n: number) {
   const ms = (n - 25569) * 86400000;
   const d = new Date(ms);
@@ -47,7 +53,6 @@ function excelSerialToYmd(n: number) {
   const day = String(d.getUTCDate()).padStart(2, "0");
   return `${y}-${m}-${day}`;
 }
-
 function toYmd(v: string | number | Date | null | undefined) {
   if (v == null) return "";
   if (v instanceof Date) {
@@ -103,7 +108,6 @@ function chunk<T>(arr: T[], size = 500) {
   for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
   return out;
 }
-
 function nextMonthStart(dateYmd: string) {
   const [y, m] = dateYmd.split("-").map(Number);
   const d = new Date(y, m - 1, 1);
@@ -118,6 +122,7 @@ export default function Actual() {
   const [preview, setPreview] = useState<ActualRow[]>([]);
   const [missing, setMissing] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
+  const [shopOpen, setShopOpen] = useState(false);
 
   useEffect(() => {
     refreshMissingList();
@@ -142,7 +147,7 @@ export default function Actual() {
     return idx;
   }
 
-  // Fetch shop.code -> shop.dept mapping (exact match on code)
+  // Fetch shop.code -> shop.dept map (exact codes)
   async function fetchDeptMap(codes: string[]) {
     if (!codes.length) return {};
     const unique = Array.from(new Set(codes.filter(Boolean)));
@@ -176,12 +181,7 @@ export default function Actual() {
       const missingHdr = required.filter((k) => idx[k] === -1);
       if (missingHdr.length) throw new Error(`Missing columns: ${missingHdr.join(", ")}`);
 
-      // collect all cost center codes in the file
-      const rawCodes = rows
-        .map((r) => String(r[idx["cost center"]] ?? "").trim())
-        .filter(Boolean);
-
-      // fetch code->dept map from `shop`
+      const rawCodes = rows.map((r) => String(r[idx["cost center"]] ?? "").trim()).filter(Boolean);
       const deptMap = await fetchDeptMap(rawCodes);
 
       const out: ActualRow[] = [];
@@ -195,8 +195,8 @@ export default function Actual() {
 
         const costCenterRaw = String(r[idx["cost center"]] ?? "").trim();
         const mappedDept = costCenterRaw
-          ? (deptMap[costCenterRaw] ?? DEFAULT_DEPT)   // not found → "Unassigned"
-          : DEFAULT_DEPT;                              // blank cell → "Unassigned"
+          ? (deptMap[costCenterRaw] ?? DEFAULT_DEPT)
+          : DEFAULT_DEPT;
 
         if (costCenterRaw && !(costCenterRaw in deptMap)) unmapped++;
 
@@ -210,7 +210,7 @@ export default function Actual() {
 
         out.push({
           no_mat: material,
-          dept: mappedDept,   // <-- final dept that will be inserted into `actual`
+          dept: mappedDept,
           quantity,
           posting_date,
           document_date,
@@ -219,7 +219,7 @@ export default function Actual() {
 
       toast.success(
         `Loaded ${out.length} rows from ${f.name}` +
-        (unmapped ? ` — ${unmapped} code(s) not in shop` : "")
+          (unmapped ? ` — ${unmapped} code(s) not in shop` : "")
       );
       setPreview(out);
     } catch (err: any) {
@@ -320,8 +320,13 @@ export default function Actual() {
         <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 dark:from-slate-950 dark:to-slate-900 p-8">
           <div className="max-w-7xl mx-auto space-y-6">
             <Card>
-              <CardHeader>
+              <CardHeader className="flex items-center justify-between">
                 <CardTitle>Actual — Upload & Import</CardTitle>
+                <div className="flex gap-2">
+                  <Button variant="outline" size="sm" onClick={() => setShopOpen(true)}>
+                    Manage Shops
+                  </Button>
+                </div>
               </CardHeader>
               <CardContent className="space-y-4">
                 <div className="flex flex-wrap items-end gap-4">
@@ -428,11 +433,205 @@ export default function Actual() {
           </div>
         </div>
       </main>
+
+      {/* Shop CRUD Dialog */}
+      <ShopManagerDialog open={shopOpen} onOpenChange={setShopOpen} />
     </div>
   );
 }
 
-/* ---------- MissingRow Component ---------- */
+/* ---------- Shop Manager Dialog (CRUD shop: code, dept, loc) ---------- */
+function ShopManagerDialog({
+  open,
+  onOpenChange,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+}) {
+  const [rows, setRows] = useState<ShopRow[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [newCode, setNewCode] = useState("");
+  const [newDept, setNewDept] = useState("");
+  const [newLoc, setNewLoc] = useState("");
+
+  useEffect(() => {
+    if (open) void load();
+  }, [open]);
+
+  async function load() {
+    setLoading(true);
+    try {
+      const { data, error } = await supabase.from("shop").select("code, dept, loc").order("code", { ascending: true });
+      if (error) throw error;
+      setRows((data ?? []).map((r) => ({ code: r.code, dept: r.dept ?? "", loc: r.loc ?? "" })));
+    } catch (e: any) {
+      toast.error(e?.message ?? "Failed to load shops");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function addShop() {
+    if (!newCode.trim() || !newDept.trim()) {
+      toast.error("Code and Dept are required");
+      return;
+    }
+    setAdding(true);
+    try {
+      const payload = { code: newCode.trim(), dept: newDept.trim(), loc: newLoc.trim() || null };
+      const { error } = await supabase.from("shop").insert(payload);
+      if (error) throw error;
+      setNewCode(""); setNewDept(""); setNewLoc("");
+      toast.success("Shop added");
+      await load();
+    } catch (e: any) {
+      toast.error(e?.message ?? "Add failed");
+    } finally {
+      setAdding(false);
+    }
+  }
+
+  async function saveRow(code: string, dept: string, loc: string | null) {
+    try {
+      const { error } = await supabase.from("shop").update({ dept, loc }).eq("code", code);
+      if (error) throw error;
+      toast.success(`Saved ${code}`);
+      await load();
+    } catch (e: any) {
+      toast.error(e?.message ?? "Save failed");
+    }
+  }
+
+  async function deleteRow(code: string) {
+    try {
+      const { error } = await supabase.from("shop").delete().eq("code", code);
+      if (error) throw error;
+      toast.success(`Deleted ${code}`);
+      setRows((prev) => prev.filter((r) => r.code !== code));
+    } catch (e: any) {
+      toast.error(e?.message ?? "Delete failed");
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-3xl">
+        <DialogHeader>
+          <DialogTitle>Manage Shops</DialogTitle>
+          <DialogDescription>View, add, edit, and delete shop records (code, dept, loc).</DialogDescription>
+        </DialogHeader>
+
+        {/* Add form */}
+        <div className="flex gap-2 items-end">
+          <div className="space-y-1">
+            <Label>Code *</Label>
+            <Input value={newCode} onChange={(e) => setNewCode(e.target.value)} className="w-36" />
+          </div>
+          <div className="space-y-1">
+            <Label>Dept *</Label>
+            <Input value={newDept} onChange={(e) => setNewDept(e.target.value)} className="w-48" />
+          </div>
+          <div className="space-y-1">
+            <Label>Loc</Label>
+            <Input value={newLoc} onChange={(e) => setNewLoc(e.target.value)} className="w-36" />
+          </div>
+          <Button onClick={addShop} disabled={adding}>{adding ? "Adding…" : "Add"}</Button>
+          <Button variant="outline" onClick={load} disabled={loading}>{loading ? "Loading…" : "Refresh"}</Button>
+        </div>
+
+        {/* List / edit table */}
+        <div className="border rounded-lg overflow-auto max-h-[60vh]">
+          <table className="w-full text-sm">
+            <thead className="sticky top-0 bg-slate-50 dark:bg-slate-900">
+              <tr>
+                <th className="px-3 py-2 text-left w-32">code</th>
+                <th className="px-3 py-2 text-left w-64">dept</th>
+                <th className="px-3 py-2 text-left w-40">loc</th>
+                <th className="px-3 py-2 text-center w-40">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.length === 0 ? (
+                <tr>
+                  <td className="px-3 py-4 text-slate-500" colSpan={4}>
+                    {loading ? "Loading…" : "No rows"}
+                  </td>
+                </tr>
+              ) : (
+                rows.map((r) => <EditableShopRow key={r.code} row={r} onSave={saveRow} onDelete={deleteRow} />)
+              )}
+            </tbody>
+          </table>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function EditableShopRow({
+  row,
+  onSave,
+  onDelete,
+}: {
+  row: ShopRow;
+  onSave: (code: string, dept: string, loc: string | null) => Promise<void>;
+  onDelete: (code: string) => Promise<void>;
+}) {
+  const [dept, setDept] = useState(row.dept);
+  const [loc, setLoc] = useState(row.loc ?? "");
+  const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
+  return (
+    <tr className="border-t">
+      <td className="px-3 py-2 font-mono">{row.code}</td>
+      <td className="px-3 py-2">
+        <Input value={dept} onChange={(e) => setDept(e.target.value)} />
+      </td>
+      <td className="px-3 py-2">
+        <Input value={loc} onChange={(e) => setLoc(e.target.value)} />
+      </td>
+      <td className="px-3 py-2 text-center">
+        <div className="flex justify-center gap-2">
+          <Button
+            size="sm"
+            onClick={async () => {
+              setSaving(true);
+              try { await onSave(row.code, dept.trim(), loc.trim() || null); }
+              finally { setSaving(false); }
+            }}
+            disabled={saving}
+          >
+            {saving ? "Saving…" : "Save"}
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => { setDept(row.dept); setLoc(row.loc ?? ""); }}
+          >
+            Reset
+          </Button>
+          <Button
+            size="sm"
+            variant="destructive"
+            onClick={async () => {
+              if (!confirm(`Delete shop "${row.code}"?`)) return;
+              setDeleting(true);
+              try { await onDelete(row.code); }
+              finally { setDeleting(false); }
+            }}
+            disabled={deleting}
+          >
+            {deleting ? "Deleting…" : "Delete"}
+          </Button>
+        </div>
+      </td>
+    </tr>
+  );
+}
+
+/* ---------- MissingRow Component (unchanged) ---------- */
 function MissingRow({
   no_mat,
   onAdd,
