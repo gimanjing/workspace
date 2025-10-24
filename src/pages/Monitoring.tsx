@@ -1,7 +1,7 @@
 // app/actual/page.tsx
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Navigation } from "@/components/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
@@ -13,7 +13,6 @@ import { CalendarDays, ChevronsUpDown, Check } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { supabase } from "@/lib/supabase";
 
-// Recharts
 import {
   ResponsiveContainer,
   BarChart, Bar,
@@ -53,9 +52,10 @@ const MONTHS = [
 ];
 
 /* =========================
-   Helpers
+   Date helpers
 ========================= */
 const fmtDate = (d: Date) => d.toISOString().slice(0, 10); // YYYY-MM-DD
+
 function monthRange(year: number, month: number) {
   const start = new Date(Date.UTC(year, month - 1, 1));
   const end = new Date(Date.UTC(year, month, 0)); // last day
@@ -72,6 +72,31 @@ function listMonthDates(year: number, month: number): string[] {
   return days;
 }
 
+// Normalize odd date strings like "20225-09-01" or "20250901" to "YYYY-MM-DD"
+function normalizeDateString(x: any): string | null {
+  if (!x) return null;
+  const s = String(x);
+
+  // yyyy(-)mm(-)dd with possibly 5-digit year
+  const m = s.match(/(\d{4,5})-(\d{2})-(\d{2})/);
+  if (m) {
+    const yyyy = m[1].slice(-4);
+    return `${yyyy}-${m[2]}-${m[3]}`;
+  }
+  // yyyymmdd
+  const m2 = s.match(/^(\d{4})(\d{2})(\d{2})$/);
+  if (m2) return `${m2[1]}-${m2[2]}-${m2[3]}`;
+
+  // Try generic
+  const d = new Date(s);
+  if (!Number.isNaN(d.getTime())) return d.toISOString().slice(0, 10);
+
+  return null;
+}
+
+/* =========================
+   Utils
+========================= */
 function safeNumber(n: any, d = 0) {
   const x = Number(n);
   return Number.isFinite(x) ? x : d;
@@ -89,7 +114,9 @@ export default function Actual() {
     material: "all",
   });
 
-  // Dept options from shop.dept
+  const [graphMode, setGraphMode] = useState<GraphMode>("Combination");
+
+  // Dept options (shop.dept)
   const [deptOptions, setDeptOptions] = useState<string[]>([]);
   useEffect(() => {
     let cancelled = false;
@@ -105,23 +132,19 @@ export default function Actual() {
     return () => { cancelled = true; };
   }, []);
 
-  // Graph mode
-  const [graphMode, setGraphMode] = useState<GraphMode>("Combination");
-
-  // Load master + shop maps once (or when needed)
+  // Reference maps: master + shop
   const [masterMap, setMasterMap] = useState<Record<string, MasterRow>>({});
   const [shopMap, setShopMap] = useState<Record<string, number>>({}); // dept -> loc (1/2)
 
   useEffect(() => {
     let cancel = false;
     (async () => {
-      const [{ data: m, error: em }, { data: s, error: es }] = await Promise.all([
+      const [{ data: m }, { data: s }] = await Promise.all([
         supabase.from("master").select("no_mat, price, quantity, category"),
         supabase.from("shop").select("dept, loc"),
       ]);
-      if (em) console.error(em);
-      if (es) console.error(es);
       if (cancel) return;
+
       const mm: Record<string, MasterRow> = {};
       (m ?? []).forEach((r: any) => {
         if (!r.no_mat) return;
@@ -133,6 +156,7 @@ export default function Actual() {
         };
       });
       setMasterMap(mm);
+
       const sm: Record<string, number> = {};
       (s ?? []).forEach((r: any) => {
         const dept = (r.dept ?? "").trim();
@@ -144,8 +168,8 @@ export default function Actual() {
     return () => { cancel = true; };
   }, []);
 
-  // Load calendar for month (both 1 and 2)
-  const [cal1, setCal1] = useState<Record<string, number>>({}); // date -> weight
+  // Calendars for the selected month
+  const [cal1, setCal1] = useState<Record<string, number>>({});
   const [cal2, setCal2] = useState<Record<string, number>>({});
   const [cal1Total, setCal1Total] = useState(0);
   const [cal2Total, setCal2Total] = useState(0);
@@ -163,13 +187,12 @@ export default function Actual() {
         .gte("date", startStr).lte("date", endStr);
 
       const [{ data: c1 }, { data: c2 }] = await Promise.all([q1, q2]);
-
       if (cancel) return;
 
       const map1: Record<string, number> = {};
       let tot1 = 0;
       (c1 ?? []).forEach((r: any) => {
-        const d = r.date?.slice(0, 10);
+        const d = normalizeDateString(r.date);
         const wt = safeNumber(r.working_time);
         const ot = safeNumber(r.over_time);
         const w = wt + ot;
@@ -179,12 +202,23 @@ export default function Actual() {
       const map2: Record<string, number> = {};
       let tot2 = 0;
       (c2 ?? []).forEach((r: any) => {
-        const d = r.date?.slice(0, 10);
+        const d = normalizeDateString(r.date);
         const wt = safeNumber(r.working_time);
         const ot = safeNumber(r.over_time);
         const w = wt + ot;
         if (d) { map2[d] = w; tot2 += w; }
       });
+
+      // Fallback to uniform distribution if empty or zero totals
+      const monthDates = listMonthDates(filters.year, filters.month);
+      if (tot1 === 0) {
+        monthDates.forEach(d => { map1[d] = 1; });
+        tot1 = monthDates.length;
+      }
+      if (tot2 === 0) {
+        monthDates.forEach(d => { map2[d] = 1; });
+        tot2 = monthDates.length;
+      }
 
       setCal1(map1); setCal1Total(tot1);
       setCal2(map2); setCal2Total(tot2);
@@ -192,7 +226,7 @@ export default function Actual() {
     return () => { cancel = true; };
   }, [filters.year, filters.month]);
 
-  // Load actual + forecast for month
+  // Actual + Forecast for month
   const [actualRows, setActualRows] = useState<ActualRow[]>([]);
   const [forecastRows, setForecastRows] = useState<ForecastRow[]>([]);
 
@@ -214,12 +248,15 @@ export default function Actual() {
       const [{ data: a }, { data: f }] = await Promise.all([qa, qf]);
       if (cancel) return;
 
-      setActualRows((a ?? []).map((r: any) => ({
-        no_mat: String(r.no_mat),
-        posting_date: String(r.posting_date).slice(0, 10),
-        quantity: safeNumber(r.quantity),
-        dept: r.dept ?? null,
-      })));
+      setActualRows((a ?? []).map((r: any) => {
+        const d = normalizeDateString(r.posting_date);
+        return {
+          no_mat: String(r.no_mat),
+          posting_date: d ?? "", // normalized
+          quantity: safeNumber(r.quantity),
+          dept: r.dept ?? null,
+        };
+      }).filter((r: any) => !!r.posting_date));
 
       setForecastRows((f ?? []).map((r: any) => ({
         no_mat: String(r.no_mat),
@@ -230,16 +267,18 @@ export default function Actual() {
     return () => { cancel = true; };
   }, [filters.year, filters.month]);
 
-  // Apply filters + compute daily values
+  /* =========================
+     Filtering + Aggregation
+  ========================= */
   const graphData = useMemo(() => {
     const dates = listMonthDates(filters.year, filters.month);
     const deptSet = new Set(deptOptions);
+
     const isDeptAllowed = (rowDept: string | null, rowShop: string | null) => {
-      const from = (filters.deptMode === "list") ? (filters.deptSelected ?? "") : "";
       if (filters.deptMode === "all") return true;
       if (filters.deptMode === "list") {
-        // actual uses dept, forecast uses shop; both must equal selected
-        return (rowDept ? rowDept.trim() === from : false) || (rowShop ? rowShop.trim() === from : false);
+        const target = (filters.deptSelected ?? "").trim();
+        return (rowDept ? rowDept.trim() === target : false) || (rowShop ? rowShop.trim() === target : false);
       }
       // unassigned
       const v = (rowDept ?? rowShop ?? "").trim();
@@ -256,14 +295,13 @@ export default function Actual() {
       return cat === filters.material;
     };
 
-    // value per unit helper (price/quantity)
     const vpu = (no_mat: string) => {
       const m = masterMap[no_mat];
-      if (!m) return 0;
+      if (!m) return 0; // set to 1 temporarily for debugging if needed
       return safeNumber(m.price) / Math.max(1, safeNumber(m.quantity, 1));
     };
 
-    // Daily Actual (sum per day)
+    // Actual per day
     const actualByDate: Record<string, number> = {};
     for (const d of dates) actualByDate[d] = 0;
 
@@ -271,11 +309,12 @@ export default function Actual() {
       if (!isMaterialAllowed(r.no_mat)) return;
       if (!isDeptAllowed(r.dept, null)) return;
       const d = r.posting_date;
-      if (!dates.includes(d)) return; // safety
-      actualByDate[d] += r.quantity * vpu(r.no_mat);
+      if (d in actualByDate) {
+        actualByDate[d] += r.quantity * vpu(r.no_mat);
+      }
     });
 
-    // Daily Forecast (distribute by calendar weight based on shop.loc)
+    // Forecast per day (distribute monthly forecast by calendar weights)
     const forecastByDate: Record<string, number> = {};
     for (const d of dates) forecastByDate[d] = 0;
 
@@ -283,7 +322,6 @@ export default function Actual() {
       if (!isMaterialAllowed(r.no_mat)) return;
       if (!isDeptAllowed(null, r.shop)) return;
 
-      // choose calendar by shop.loc (fallback to cal1)
       const dept = (r.shop ?? "").trim();
       const loc = shopMap[dept] ?? 1;
       const cal = loc === 2 ? cal2 : cal1;
@@ -292,7 +330,6 @@ export default function Actual() {
 
       const totalValue = r.quantity * vpu(r.no_mat);
 
-      // Distribute across month
       dates.forEach(d => {
         const weight = cal[d] ?? 0;
         const share = weight / denom;
@@ -308,7 +345,7 @@ export default function Actual() {
       cumA += a;
       cumF += f;
       return {
-        date: d.slice(8, 10), // show DD on x-axis
+        date: d.slice(8, 10), // DD for x-axis
         actual: Number(a.toFixed(2)),
         forecast: Number(f.toFixed(2)),
         cumActual: Number(cumA.toFixed(2)),
@@ -337,15 +374,11 @@ export default function Actual() {
                 <CardTitle className="text-base">Filters</CardTitle>
               </CardHeader>
               <CardContent>
-                <FiltersUI
-                  filters={filters}
-                  setFilters={setFilters}
-                  deptOptions={deptOptions}
-                />
+                <FiltersUI filters={filters} setFilters={setFilters} deptOptions={deptOptions} />
               </CardContent>
             </Card>
 
-            {/* Graph Mode */}
+            {/* Graphs */}
             <Card>
               <CardHeader className="flex items-center justify-between gap-4">
                 <CardTitle>Graphs</CardTitle>
@@ -363,8 +396,12 @@ export default function Actual() {
                   </Select>
                 </div>
               </CardHeader>
-              <CardContent className="space-y-6">
+              <CardContent className="space-y-4">
                 <GraphBlock mode={graphMode} data={graphData} />
+                {/* quick sanity footer; remove later */}
+                <div className="text-xs text-muted-foreground">
+                  days: {graphData.length} • sumA: {graphData.reduce((s,r)=>s+r.actual,0).toFixed(2)} • sumF: {graphData.reduce((s,r)=>s+r.forecast,0).toFixed(2)}
+                </div>
               </CardContent>
             </Card>
           </div>
@@ -375,7 +412,7 @@ export default function Actual() {
 }
 
 /* =========================
-   Filters UI (same behavior you requested)
+   Filters UI
 ========================= */
 function FiltersUI({
   filters,
@@ -388,10 +425,6 @@ function FiltersUI({
 }) {
   const now = new Date();
   const [deptOpen, setDeptOpen] = useState(false);
-  const monthLabel = useMemo(
-    () => MONTHS.find(m => m.value === filters.month)?.label ?? "",
-    [filters.month]
-  );
 
   return (
     <div className="grid gap-4 md:grid-cols-12">
@@ -424,7 +457,7 @@ function FiltersUI({
           </Button>
         </div>
         <p className="text-xs text-muted-foreground">
-          Applies to both <span className="font-mono">forecast</span> and <span className="font-mono">actual</span> tables.
+          Applies to both <span className="font-mono">forecast</span> and <span className="font-mono">actual</span>.
         </p>
       </div>
 
@@ -446,43 +479,18 @@ function FiltersUI({
             </SelectContent>
           </Select>
 
-          {/* Dept picker shows only when mode === 'list' */}
           {filters.deptMode === "list" && (
-            <Popover open={deptOpen} onOpenChange={setDeptOpen}>
-              <PopoverTrigger asChild>
-                <Button
-                  variant="outline"
-                  role="combobox"
-                  className={cn("w-56 justify-between", !filters.deptSelected && "text-muted-foreground")}
-                >
-                  {filters.deptSelected || "Select department"}
-                  <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
-                </Button>
-              </PopoverTrigger>
-              <PopoverContent className="w-56 p-0">
-                <Command>
-                  <CommandInput placeholder="Search dept..." />
-                  <CommandEmpty>No department found.</CommandEmpty>
-                  <CommandGroup>
-                    {deptOptions.map((dept) => (
-                      <CommandItem
-                        key={dept}
-                        value={dept}
-                        onSelect={(v) => { setFilters(f => ({ ...f, deptSelected: v })); setDeptOpen(false); }}
-                      >
-                        <Check className={cn("mr-2 h-4 w-4", dept === filters.deptSelected ? "opacity-100" : "opacity-0")} />
-                        {dept}
-                      </CommandItem>
-                    ))}
-                  </CommandGroup>
-                </Command>
-              </PopoverContent>
-            </Popover>
+            <DeptCombobox
+              value={filters.deptSelected}
+              options={deptOptions}
+              onSelect={(v) => setFilters(f => ({ ...f, deptSelected: v }))}
+              openState={[undefined, setDeptOpen]}
+            />
           )}
         </div>
         <p className="text-xs text-muted-foreground">
-          Source list from <span className="font-mono">shop.dept</span>; “Unassigned” means rows where
-          <span className="font-mono"> actual.dept</span> / <span className="font-mono">forecast.shop</span> are not in
+          Source list from <span className="font-mono">shop.dept</span>; “Unassigned” = values in
+          <span className="font-mono"> actual.dept</span>/<span className="font-mono">forecast.shop</span> not in
           <span className="font-mono"> shop.dept</span>.
         </p>
       </div>
@@ -505,19 +513,56 @@ function FiltersUI({
           </SelectContent>
         </Select>
         <p className="text-xs text-muted-foreground">
-          Based on <span className="font-mono">master.category</span>. “Unassigned” = anything else.
+          Based on <span className="font-mono">master.category</span>.
         </p>
       </div>
-
-      {/* Dev aid (remove) */}
-      <div className="md:col-span-12">
-        <div className="rounded-xl border p-3 text-xs text-muted-foreground font-mono">
-          {MONTHS.find(m => m.value === filters.month)?.label} {filters.year}
-          {" • "}Dept: {filters.deptMode}{filters.deptMode === "list" && filters.deptSelected ? ` → ${filters.deptSelected}` : ""}
-          {" • "}Material: {filters.material}
-        </div>
-      </div>
     </div>
+  );
+}
+
+function DeptCombobox({
+  value,
+  options,
+  onSelect,
+  openState,
+}: {
+  value?: string;
+  options: string[];
+  onSelect: (v: string) => void;
+  openState?: [boolean | undefined, (o: boolean) => void];
+}) {
+  const [open, setOpen] = openState ?? useState(false);
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button
+          variant="outline"
+          role="combobox"
+          className={cn("w-56 justify-between", !value && "text-muted-foreground")}
+        >
+          {value || "Select department"}
+          <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent className="w-56 p-0">
+        <Command>
+          <CommandInput placeholder="Search dept..." />
+          <CommandEmpty>No department found.</CommandEmpty>
+          <CommandGroup>
+            {options.map((dept) => (
+              <CommandItem
+                key={dept}
+                value={dept}
+                onSelect={(v) => { onSelect(v); setOpen(false); }}
+              >
+                <Check className={cn("mr-2 h-4 w-4", dept === value ? "opacity-100" : "opacity-0")} />
+                {dept}
+              </CommandItem>
+            ))}
+          </CommandGroup>
+        </Command>
+      </PopoverContent>
+    </Popover>
   );
 }
 
