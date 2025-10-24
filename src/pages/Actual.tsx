@@ -1,10 +1,9 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import readXlsxFile from "read-excel-file"; // safer parser
+import { useEffect, useState } from "react";
+import readXlsxFile from "read-excel-file";
 import { supabase } from "@/lib/supabase";
 import { Navigation } from "@/components/navigation";
-
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -14,7 +13,7 @@ import { toast } from "sonner";
 /* ---------- Types ---------- */
 type ActualRow = {
   no_mat: string;
-  dept: string | null;
+  dept: string;                 // always a string now (mapped or "Unassigned")
   quantity: number | null;
   posting_date: string;
   document_date: string;
@@ -31,13 +30,15 @@ type MasterRow = {
   updated_at?: string;
 };
 
-/* ---------- Excel parsing helpers ---------- */
+/* ---------- Config ---------- */
+const DEFAULT_DEPT = "Unassigned";
+
+/* ---------- Helpers ---------- */
 function normalizeHeader(h: string) {
   return h.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
 function excelSerialToYmd(n: number) {
-  // Fallback in case a date comes as Excel serial
   const ms = (n - 25569) * 86400000;
   const d = new Date(ms);
   if (isNaN(d.getTime())) return "";
@@ -76,7 +77,7 @@ function toYmd(v: string | number | Date | null | undefined) {
   return s;
 }
 
-// Simple file gate: only .xlsx up to 8 MB
+// only .xlsx up to 8 MB
 const ALLOWED_EXT = [".xlsx"];
 const MAX_BYTES = 8 * 1024 * 1024;
 function isAllowedExcel(file: File) {
@@ -84,15 +85,14 @@ function isAllowedExcel(file: File) {
   const extOk = ALLOWED_EXT.some((e) => name.endsWith(e));
   const sizeOk = file.size <= MAX_BYTES;
   const mimeOk =
-    file.type === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ||
-    file.type === ""; // some browsers leave it blank
+    file.type === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" || file.type === "";
   return extOk && sizeOk && mimeOk;
 }
 
-// Parse first sheet and return AoA-like structure your code expects
+// Parse first sheet → { headers, rows }
 async function parseExcel(file: File): Promise<{ headers: string[]; rows: any[][] }> {
-  const rows = await readXlsxFile(file, { sheet: 1 }); // 1-indexed
-  if (!rows || rows.length === 0) return { headers: [], rows: [] };
+  const rows = await readXlsxFile(file, { sheet: 1 });
+  if (!rows?.length) return { headers: [], rows: [] };
   const [headerRow, ...rest] = rows;
   const headers = (headerRow ?? []).map((h: any) => String(h ?? "").trim());
   return { headers, rows: rest as any[][] };
@@ -113,9 +113,8 @@ function nextMonthStart(dateYmd: string) {
 
 /* ---------- Page ---------- */
 export default function Actual() {
-  const [_now] = useState(useMemo(() => new Date(), []));
   const [file, setFile] = useState<File | null>(null);
-  const [fileKey, setFileKey] = useState(0); // to reset <input type="file">
+  const [fileKey, setFileKey] = useState(0);
   const [preview, setPreview] = useState<ActualRow[]>([]);
   const [missing, setMissing] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
@@ -125,10 +124,7 @@ export default function Actual() {
   }, []);
 
   function mapHeaders(headers: string[]) {
-    const idx: Record<
-      "material" | "cost center" | "total quantity" | "posting date" | "document date",
-      number
-    > = {
+    const idx: Record<"material" | "cost center" | "total quantity" | "posting date" | "document date", number> = {
       "material": -1,
       "cost center": -1,
       "total quantity": -1,
@@ -144,6 +140,19 @@ export default function Actual() {
       else if (n === "document date") idx["document date"] = i;
     });
     return idx;
+  }
+
+  // Fetch shop.code -> shop.dept mapping (exact match on code)
+  async function fetchDeptMap(codes: string[]) {
+    if (!codes.length) return {};
+    const unique = Array.from(new Set(codes.filter(Boolean)));
+    const { data, error } = await supabase.from("shop").select("code, dept").in("code", unique);
+    if (error) throw error;
+    const map: Record<string, string> = {};
+    (data ?? []).forEach((r: any) => {
+      if (r?.code) map[String(r.code).trim()] = r?.dept ? String(r.dept).trim() : DEFAULT_DEPT;
+    });
+    return map;
   }
 
   async function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
@@ -167,26 +176,51 @@ export default function Actual() {
       const missingHdr = required.filter((k) => idx[k] === -1);
       if (missingHdr.length) throw new Error(`Missing columns: ${missingHdr.join(", ")}`);
 
+      // collect all cost center codes in the file
+      const rawCodes = rows
+        .map((r) => String(r[idx["cost center"]] ?? "").trim())
+        .filter(Boolean);
+
+      // fetch code->dept map from `shop`
+      const deptMap = await fetchDeptMap(rawCodes);
+
       const out: ActualRow[] = [];
+      let unmapped = 0;
+
       for (const r of rows) {
         if (!r || r.length === 0) continue;
+
         const material = String(r[idx["material"]] ?? "").trim();
-        const dept = String(r[idx["cost center"]] ?? "").trim();
-        const qtyRaw = r[idx["total quantity"]];
-        const postingRaw = r[idx["posting date"]];
-        const docRaw = r[idx["document date"]];
         if (!material) continue;
 
+        const costCenterRaw = String(r[idx["cost center"]] ?? "").trim();
+        const mappedDept = costCenterRaw
+          ? (deptMap[costCenterRaw] ?? DEFAULT_DEPT)   // not found → "Unassigned"
+          : DEFAULT_DEPT;                              // blank cell → "Unassigned"
+
+        if (costCenterRaw && !(costCenterRaw in deptMap)) unmapped++;
+
+        const qtyRaw = r[idx["total quantity"]];
         const qtmp = String(qtyRaw ?? "").replace(/,/g, "").trim();
-        const quantity = qtmp ? Number(qtmp) : null;
+        const n = qtmp ? Number(qtmp) : null;
+        const quantity = n != null && Number.isNaN(n) ? null : n;
 
-        const posting_date = toYmd(postingRaw as any);
-        const document_date = toYmd(docRaw as any);
+        const posting_date = toYmd(r[idx["posting date"]] as any);
+        const document_date = toYmd(r[idx["document date"]] as any);
 
-        out.push({ no_mat: material, dept: dept || null, quantity, posting_date, document_date });
+        out.push({
+          no_mat: material,
+          dept: mappedDept,   // <-- final dept that will be inserted into `actual`
+          quantity,
+          posting_date,
+          document_date,
+        });
       }
 
-      toast.success(`Loaded ${out.length} rows from ${f.name}`);
+      toast.success(
+        `Loaded ${out.length} rows from ${f.name}` +
+        (unmapped ? ` — ${unmapped} code(s) not in shop` : "")
+      );
       setPreview(out);
     } catch (err: any) {
       console.error(err);
@@ -201,13 +235,13 @@ export default function Actual() {
     }
     setBusy(true);
     try {
+      // Purge affected months
       const months = new Set<string>();
       for (const r of preview) {
         const base = r.posting_date || r.document_date;
         if (!base || !/^\d{4}-\d{2}-\d{2}$/.test(base)) continue;
         months.add(base.slice(0, 7));
       }
-
       for (const ym of months) {
         const start = `${ym}-01`;
         const next = nextMonthStart(start);
@@ -219,6 +253,7 @@ export default function Actual() {
         if (delErr) throw new Error(`Purge ${ym} failed: ${delErr.message}`);
       }
 
+      // Insert in chunks
       for (const group of chunk(preview, 500)) {
         const { error } = await supabase.from("actual").insert(group);
         if (error) throw new Error(`Insert failed: ${error.message}`);
@@ -242,7 +277,7 @@ export default function Actual() {
         mat_name: payload.mat_name,
         category: payload.category,
         qty: payload.qty,
-        Price: payload.Price, // keeping current column names
+        Price: payload.Price,
         UoM: payload.UoM,
         created_at: now,
         updated_at: now,
@@ -312,7 +347,7 @@ export default function Actual() {
                       setFile(null);
                       setPreview([]);
                       setMissing([]);
-                      setFileKey((k) => k + 1); // clears file input
+                      setFileKey((k) => k + 1);
                     }}
                   >
                     Clear
@@ -342,7 +377,7 @@ export default function Actual() {
                           {preview.slice(0, 20).map((r, i) => (
                             <tr key={i} className="border-t">
                               <td className="px-3 py-2 font-mono">{r.no_mat}</td>
-                              <td className="px-3 py-2">{r.dept ?? ""}</td>
+                              <td className="px-3 py-2">{r.dept}</td>
                               <td className="px-3 py-2 text-right tabular-nums">{r.quantity ?? ""}</td>
                               <td className="px-3 py-2 tabular-nums">{r.posting_date}</td>
                               <td className="px-3 py-2 tabular-nums">{r.document_date}</td>
