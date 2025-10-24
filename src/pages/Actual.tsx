@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import readXlsxFile from "read-excel-file"; // <-- new, safe parser
+import readXlsxFile from "read-excel-file"; // safer parser
 import { supabase } from "@/lib/supabase";
 import { Navigation } from "@/components/navigation";
 
@@ -37,7 +37,7 @@ function normalizeHeader(h: string) {
 }
 
 function excelSerialToYmd(n: number) {
-  // read-excel-file already returns JS types for cells, but in case a date arrives as serial:
+  // Fallback in case a date comes as Excel serial
   const ms = (n - 25569) * 86400000;
   const d = new Date(ms);
   if (isNaN(d.getTime())) return "";
@@ -76,10 +76,22 @@ function toYmd(v: string | number | Date | null | undefined) {
   return s;
 }
 
-// Use read-excel-file to parse first sheet, returning AoA as your code expects.
+// Simple file gate: only .xlsx up to 8 MB
+const ALLOWED_EXT = [".xlsx"];
+const MAX_BYTES = 8 * 1024 * 1024;
+function isAllowedExcel(file: File) {
+  const name = file.name.toLowerCase();
+  const extOk = ALLOWED_EXT.some((e) => name.endsWith(e));
+  const sizeOk = file.size <= MAX_BYTES;
+  const mimeOk =
+    file.type === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ||
+    file.type === ""; // some browsers leave it blank
+  return extOk && sizeOk && mimeOk;
+}
+
+// Parse first sheet and return AoA-like structure your code expects
 async function parseExcel(file: File): Promise<{ headers: string[]; rows: any[][] }> {
-  // sheet: 1 means the first sheet (1-indexed)
-  const rows = await readXlsxFile(file, { sheet: 1 });
+  const rows = await readXlsxFile(file, { sheet: 1 }); // 1-indexed
   if (!rows || rows.length === 0) return { headers: [], rows: [] };
   const [headerRow, ...rest] = rows;
   const headers = (headerRow ?? []).map((h: any) => String(h ?? "").trim());
@@ -108,13 +120,15 @@ export default function Actual() {
   const [missing, setMissing] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
 
-  // load missing on mount
   useEffect(() => {
     refreshMissingList();
   }, []);
 
   function mapHeaders(headers: string[]) {
-    const idx: Record<"material" | "cost center" | "total quantity" | "posting date" | "document date", number> = {
+    const idx: Record<
+      "material" | "cost center" | "total quantity" | "posting date" | "document date",
+      number
+    > = {
       "material": -1,
       "cost center": -1,
       "total quantity": -1,
@@ -139,6 +153,11 @@ export default function Actual() {
     setMissing([]);
     if (!f) return;
 
+    if (!isAllowedExcel(f)) {
+      toast.error("Invalid file. Only .xlsx up to 8MB is allowed.");
+      return;
+    }
+
     try {
       const { headers, rows } = await parseExcel(f);
       if (headers.length === 0) throw new Error("No header row found");
@@ -158,7 +177,6 @@ export default function Actual() {
         const docRaw = r[idx["document date"]];
         if (!material) continue;
 
-        // quantity normalization
         const qtmp = String(qtyRaw ?? "").replace(/,/g, "").trim();
         const quantity = qtmp ? Number(qtmp) : null;
 
@@ -224,7 +242,7 @@ export default function Actual() {
         mat_name: payload.mat_name,
         category: payload.category,
         qty: payload.qty,
-        Price: payload.Price, // keeping your current column names
+        Price: payload.Price, // keeping current column names
         UoM: payload.UoM,
         created_at: now,
         updated_at: now,
@@ -273,12 +291,12 @@ export default function Actual() {
               <CardContent className="space-y-4">
                 <div className="flex flex-wrap items-end gap-4">
                   <div className="space-y-2">
-                    <Label htmlFor="file">Excel file (.xlsx / .xls)</Label>
+                    <Label htmlFor="file">Excel file (.xlsx only)</Label>
                     <Input
                       key={fileKey}
                       id="file"
                       type="file"
-                      accept=".xlsx,.xls"
+                      accept=".xlsx"
                       onChange={handleFile}
                       className="w-80"
                     />
