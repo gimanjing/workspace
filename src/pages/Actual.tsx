@@ -2,12 +2,32 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
-import { Navigation } from "@/components/navigation";
+
+/* Navigation & Layout */
+import { SidebarProvider, Sidebar, SidebarContent, SidebarGroup, SidebarGroupLabel, SidebarGroupContent, SidebarMenu, SidebarMenuItem, SidebarMenuButton, SidebarTrigger } from "@/components/ui/sidebar";
+import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from "@/components/ui/resizable";
+import { ScrollArea } from "@/components/ui/scroll-area";
+
+/* Page chrome */
+import { Breadcrumb, BreadcrumbList, BreadcrumbItem, BreadcrumbLink, BreadcrumbSeparator, BreadcrumbPage } from "@/components/ui/breadcrumb";
+import { Card, CardContent, CardHeader, CardTitle, CardDescription, CardFooter } from "@/components/ui/card";
+import { Separator } from "@/components/ui/separator";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { Badge } from "@/components/ui/badge";
+import { Progress } from "@/components/ui/progress";
+import { Tooltip, TooltipProvider, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { toast } from "sonner";
+
+/* Table */
+import {
+  Table, TableHeader, TableHead, TableRow, TableBody, TableCell
+} from "@/components/ui/table";
+
+/* Optional icons (lucide-react) */
+import { Upload, Trash2, RefreshCw, Database, FileSpreadsheet, ArrowRightLeft } from "lucide-react";
 
 /* ---------- Types ---------- */
 type ActualRow = {
@@ -29,7 +49,7 @@ type MasterRow = {
   updated_at?: string;
 };
 
-/* ---------- Excel parsing helpers ---------- */
+/* ---------- Helpers (unchanged logic) ---------- */
 function normalizeHeader(h: string) {
   return h.trim().toLowerCase().replace(/\s+/g, " ");
 }
@@ -59,16 +79,16 @@ function toYmd(v: string | number | null | undefined) {
   }
   const m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
   if (m) {
-    const d = m[1].padStart(2, "0");
+    const d2 = m[1].padStart(2, "0");
     const mo = m[2].padStart(2, "0");
     const y = m[3].length === 2 ? `20${m[3]}` : m[3];
-    return `${y}-${mo}-${d}`;
+    return `${y}-${mo}-${d2}`;
   }
   return s;
 }
 
 async function parseExcel(file: File): Promise<{ headers: string[]; rows: any[][] }> {
-  const XLSX = await import("https://esm.sh/xlsx@0.18.5");
+  const XLSX = await import("xlsx"); // cosmetic refactor: local module
   const buf = await file.arrayBuffer();
   const wb = XLSX.read(buf, { type: "array" });
   const wsName = wb.SheetNames[0];
@@ -98,11 +118,11 @@ function nextMonthStart(dateYmd: string) {
 export default function Actual() {
   const [_now] = useState(useMemo(() => new Date(), []));
   const [file, setFile] = useState<File | null>(null);
+  const [fileKey, setFileKey] = useState(0);
   const [preview, setPreview] = useState<ActualRow[]>([]);
   const [missing, setMissing] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
 
-  // load missing on mount
   useEffect(() => {
     refreshMissingList();
   }, []);
@@ -130,7 +150,6 @@ export default function Actual() {
     const f = e.target.files?.[0] ?? null;
     setFile(f);
     setPreview([]);
-    setMissing([]);
     if (!f) return;
 
     try {
@@ -152,8 +171,8 @@ export default function Actual() {
         const docRaw = r[idx["document date"]];
         if (!material) continue;
 
-        const quantity =
-          qtyRaw == null || String(qtyRaw).trim() === "" ? null : Number(String(qtyRaw).replace(/,/g, ""));
+        const qtmp = String(qtyRaw ?? "").replace(/,/g, "").trim();
+        const quantity = qtmp ? Number(qtmp) : null;
         const posting_date = toYmd(postingRaw);
         const document_date = toYmd(docRaw);
 
@@ -216,8 +235,8 @@ export default function Actual() {
         mat_name: payload.mat_name,
         category: payload.category,
         qty: payload.qty,
-        Price: payload.Price,   // ✅ Capital P
-        UoM: payload.UoM,       // ✅ Capital U and M
+        Price: payload.Price,
+        UoM: payload.UoM,
         created_at: now,
         updated_at: now,
       });
@@ -236,8 +255,8 @@ export default function Actual() {
       const { data: masterData, error: err2 } = await supabase.from("master").select("no_mat");
       if (err2) throw err2;
 
-      const masterSet = new Set(masterData.map((m) => m.no_mat));
-      const missingList = Array.from(new Set(actualData.map((a) => a.no_mat))).filter(
+      const masterSet = new Set((masterData ?? []).map((m) => m.no_mat));
+      const missingList = Array.from(new Set((actualData ?? []).map((a) => a.no_mat))).filter(
         (x) => !masterSet.has(x)
       );
 
@@ -248,116 +267,251 @@ export default function Actual() {
     }
   }
 
-  /* ---------- JSX ---------- */
   return (
-    <div className="min-h-dvh grid grid-cols-[260px_1fr]">
-      <aside className="border-r bg-white dark:bg-slate-900 sticky top-0 h-dvh overflow-y-auto">
-        <Navigation />
-      </aside>
+    <SidebarProvider>
+      <div className="min-h-dvh grid grid-cols-[260px_1fr] bg-background">
+        {/* Sidebar */}
+        <aside className="border-r bg-card sticky top-0 h-dvh">
+          <Sidebar>
+            <SidebarContent>
+              <SidebarGroup>
+                <SidebarGroupLabel>Data</SidebarGroupLabel>
+                <SidebarGroupContent>
+                  <SidebarMenu>
+                    <SidebarMenuItem>
+                      <SidebarMenuButton asChild>
+                        <a className="truncate">Actual Import</a>
+                      </SidebarMenuButton>
+                    </SidebarMenuItem>
+                    <SidebarMenuItem>
+                      <SidebarMenuButton asChild>
+                        <a className="truncate">Master</a>
+                      </SidebarMenuButton>
+                    </SidebarMenuItem>
+                  </SidebarMenu>
+                </SidebarGroupContent>
+              </SidebarGroup>
+            </SidebarContent>
+          </Sidebar>
+        </aside>
 
-      <main className="min-w-0 overflow-x-hidden">
-        <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 dark:from-slate-950 dark:to-slate-900 p-8">
-          <div className="max-w-7xl mx-auto space-y-6">
-            <Card>
-              <CardHeader>
-                <CardTitle>Actual — Upload & Import</CardTitle>
+        {/* Main */}
+        <main className="min-w-0">
+          <div className="px-8 py-6">
+            {/* Header */}
+            <div className="flex items-center justify-between gap-4">
+              <div className="min-w-0">
+                <Breadcrumb>
+                  <BreadcrumbList>
+                    <BreadcrumbItem>
+                      <BreadcrumbLink href="#">Data</BreadcrumbLink>
+                    </BreadcrumbItem>
+                    <BreadcrumbSeparator />
+                    <BreadcrumbItem>
+                      <BreadcrumbPage>Actual Import</BreadcrumbPage>
+                    </BreadcrumbItem>
+                  </BreadcrumbList>
+                </Breadcrumb>
+                <div className="mt-2">
+                  <h1 className="text-2xl font-semibold tracking-tight">Actual — Upload & Import</h1>
+                  <p className="text-sm text-muted-foreground">
+                    Prepare rows from Excel, purge the affected month(s), and import in batches.
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button variant="outline" size="sm" onClick={refreshMissingList}>
+                        <RefreshCw className="h-4 w-4 mr-2" />
+                        Refresh Missing
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent side="bottom">Rebuild the missing list from current data</TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+                <SidebarTrigger />
+              </div>
+            </div>
+
+            <Separator className="my-6" />
+
+            {/* Uploader + Actions */}
+            <Card className="border-dashed">
+              <CardHeader className="pb-4">
+                <CardTitle className="text-base">Upload Excel</CardTitle>
+                <CardDescription>Accepts .xlsx / .xls. First sheet is used.</CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
-                <div className="flex flex-wrap items-end gap-4">
-                  <div className="space-y-2">
-                    <Label htmlFor="file">Excel file (.xlsx / .xls)</Label>
-                    <Input
-                      id="file"
-                      type="file"
-                      accept=".xlsx,.xls"
-                      onChange={handleFile}
-                      className="w-80"
-                    />
+                <div
+                  className="rounded-lg border-2 border-dashed p-6 bg-muted/30 hover:bg-muted/50 transition-colors"
+                >
+                  <div className="flex flex-wrap items-end gap-4">
+                    <div className="space-y-2">
+                      <Label htmlFor="file" className="text-sm">Excel file</Label>
+                      <Input
+                        key={fileKey}
+                        id="file"
+                        type="file"
+                        accept=".xlsx,.xls"
+                        onChange={handleFile}
+                        className="w-80"
+                      />
+                      {file && (
+                        <div className="text-xs text-muted-foreground">
+                          Selected: <span className="font-medium">{file.name}</span>
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        variant="outline"
+                        onClick={() => { setFile(null); setPreview([]); setFileKey(k => k + 1); }}
+                      >
+                        <Trash2 className="h-4 w-4 mr-2" />
+                        Clear
+                      </Button>
+                      <Button onClick={importNow} disabled={!preview.length || busy}>
+                        {busy ? (
+                          <>
+                            <ArrowRightLeft className="h-4 w-4 mr-2 animate-spin" />
+                            Importing…
+                          </>
+                        ) : (
+                          <>
+                            <Upload className="h-4 w-4 mr-2" />
+                            Purge month(s) & Import
+                          </>
+                        )}
+                      </Button>
+                    </div>
                   </div>
-                  <Button variant="outline" onClick={() => { setFile(null); setPreview([]); setMissing([]); }}>
-                    Clear
-                  </Button>
-                  <Button onClick={importNow} disabled={!preview.length || busy}>
-                    {busy ? "Importing…" : "Purge month(s) & Import"}
-                  </Button>
+                  <div className="mt-4">
+                    <Progress value={preview.length ? 100 : 0} className="h-1.5" />
+                    <div className="mt-2 text-xs text-muted-foreground">
+                      {preview.length ? `Prepared ${preview.length} row(s)` : "No rows prepared"}
+                    </div>
+                  </div>
                 </div>
-
-                {preview.length > 0 && (
-                  <div className="space-y-2">
-                    <div className="text-sm text-slate-600 dark:text-slate-300">
-                      Prepared <b>{preview.length}</b> rows. Showing first 20:
-                    </div>
-                    <div className="border rounded-lg overflow-auto max-h-[50vh]">
-                      <table className="w-full text-sm">
-                        <thead className="sticky top-0 bg-slate-50 dark:bg-slate-900">
-                          <tr>
-                            <th className="px-3 py-2 text-left">no_mat</th>
-                            <th className="px-3 py-2 text-left">dept</th>
-                            <th className="px-3 py-2 text-right">quantity</th>
-                            <th className="px-3 py-2 text-left">posting_date</th>
-                            <th className="px-3 py-2 text-left">document_date</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {preview.slice(0, 20).map((r, i) => (
-                            <tr key={i} className="border-t">
-                              <td className="px-3 py-2">{r.no_mat}</td>
-                              <td className="px-3 py-2">{r.dept ?? ""}</td>
-                              <td className="px-3 py-2 text-right">{r.quantity ?? ""}</td>
-                              <td className="px-3 py-2">{r.posting_date}</td>
-                              <td className="px-3 py-2">{r.document_date}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                )}
               </CardContent>
+              <CardFooter className="text-xs text-muted-foreground">
+                <FileSpreadsheet className="h-3.5 w-3.5 mr-2" />
+                Ensure the header row contains Material, Cost Center, Total Quantity, Posting Date, Document Date.
+              </CardFooter>
             </Card>
 
-            <Card>
-              <CardHeader className="flex items-center justify-between">
-                <CardTitle>Materials missing in master</CardTitle>
-                <Button size="sm" variant="outline" onClick={refreshMissingList}>
-                  Refresh Missing List
-                </Button>
-              </CardHeader>
-              <CardContent>
-                {missing.length === 0 ? (
-                  <div className="text-sm text-slate-500">No missing items. Import or refresh data first.</div>
-                ) : (
-                  <div className="border rounded-lg overflow-auto max-h-[60vh]">
-                    <table className="w-full text-sm">
-                      <thead className="sticky top-0 bg-slate-50 dark:bg-slate-900">
-                        <tr>
-                          <th className="px-3 py-2 text-left w-40">no_mat</th>
-                          <th className="px-3 py-2 text-left w-64">mat_name</th>
-                          <th className="px-3 py-2 text-left w-48">category</th>
-                          <th className="px-3 py-2 text-right w-20">qty</th>
-                          <th className="px-3 py-2 text-right w-24">Price</th>
-                          <th className="px-3 py-2 text-left w-20">UoM</th>
-                          <th className="px-3 py-2 text-center w-32">Action</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {missing.map((no_mat) => (
-                          <MissingRow key={no_mat} no_mat={no_mat} onAdd={addToMaster} />
-                        ))}
-                      </tbody>
-                    </table>
+            {/* Workspace */}
+            <div className="mt-6">
+              <ResizablePanelGroup direction="horizontal" className="rounded-lg border">
+                <ResizablePanel defaultSize={55} minSize={35}>
+                  <div className="h-[62vh] flex flex-col">
+                    <div className="px-4 py-3 border-b flex items-center justify-between bg-muted/30">
+                      <div className="flex items-center gap-2">
+                        <CardTitle className="text-base">Preview</CardTitle>
+                        <Badge variant="secondary">{preview.length}</Badge>
+                      </div>
+                      <span className="text-xs text-muted-foreground">Showing first 20 rows</span>
+                    </div>
+
+                    <ScrollArea className="flex-1">
+                      <div className="p-4 pt-2">
+                        <div className="rounded-md border overflow-hidden">
+                          <Table className="[&_th]:bg-muted/40">
+                            <TableHeader className="sticky top-0 z-10">
+                              <TableRow>
+                                <TableHead className="min-w-[140px]">no_mat</TableHead>
+                                <TableHead className="min-w-[120px]">dept</TableHead>
+                                <TableHead className="text-right min-w-[100px]">quantity</TableHead>
+                                <TableHead className="min-w-[120px]">posting_date</TableHead>
+                                <TableHead className="min-w-[120px]">document_date</TableHead>
+                              </TableRow>
+                            </TableHeader>
+                            <TableBody>
+                              {preview.slice(0, 20).map((r, i) => (
+                                <TableRow key={i} className="even:bg-muted/20">
+                                  <TableCell className="font-mono">{r.no_mat}</TableCell>
+                                  <TableCell>{r.dept ?? ""}</TableCell>
+                                  <TableCell className="text-right tabular-nums">{r.quantity ?? ""}</TableCell>
+                                  <TableCell className="tabular-nums">{r.posting_date}</TableCell>
+                                  <TableCell className="tabular-nums">{r.document_date}</TableCell>
+                                </TableRow>
+                              ))}
+                              {preview.length === 0 && (
+                                <TableRow>
+                                  <TableCell colSpan={5} className="h-24 text-center text-sm text-muted-foreground">
+                                    No preview. Upload a file to see parsed rows.
+                                  </TableCell>
+                                </TableRow>
+                              )}
+                            </TableBody>
+                          </Table>
+                        </div>
+                      </div>
+                    </ScrollArea>
                   </div>
-                )}
-              </CardContent>
-            </Card>
+                </ResizablePanel>
+
+                <ResizableHandle withHandle />
+
+                <ResizablePanel defaultSize={45} minSize={30}>
+                  <div className="h-[62vh] flex flex-col">
+                    <div className="px-4 py-3 border-b flex items-center justify-between bg-muted/30">
+                      <div className="flex items-center gap-2">
+                        <CardTitle className="text-base">Materials missing in master</CardTitle>
+                        <Badge variant="outline">{missing.length}</Badge>
+                      </div>
+                      <Button size="sm" variant="outline" onClick={refreshMissingList}>
+                        <RefreshCw className="h-4 w-4 mr-2" />
+                        Refresh
+                      </Button>
+                    </div>
+
+                    <ScrollArea className="flex-1">
+                      <div className="p-4 pt-2">
+                        <div className="rounded-md border overflow-hidden">
+                          <Table className="[&_th]:bg-muted/40">
+                            <TableHeader className="sticky top-0 z-10">
+                              <TableRow>
+                                <TableHead className="w-40">no_mat</TableHead>
+                                <TableHead className="w-64">mat_name</TableHead>
+                                <TableHead className="w-48">category</TableHead>
+                                <TableHead className="text-right w-24">qty</TableHead>
+                                <TableHead className="text-right w-28">Price</TableHead>
+                                <TableHead className="w-24">UoM</TableHead>
+                                <TableHead className="text-center w-32">Action</TableHead>
+                              </TableRow>
+                            </TableHeader>
+                            <TableBody>
+                              {missing.length === 0 ? (
+                                <TableRow>
+                                  <TableCell colSpan={7} className="h-24 text-center text-sm text-muted-foreground">
+                                    No missing items. Import or refresh data first.
+                                  </TableCell>
+                                </TableRow>
+                              ) : (
+                                missing.map((no_mat) => (
+                                  <MissingRow key={no_mat} no_mat={no_mat} onAdd={addToMaster} />
+                                ))
+                              )}
+                            </TableBody>
+                          </Table>
+                        </div>
+                      </div>
+                    </ScrollArea>
+                  </div>
+                </ResizablePanel>
+              </ResizablePanelGroup>
+            </div>
           </div>
-        </div>
-      </main>
-    </div>
+        </main>
+      </div>
+    </SidebarProvider>
   );
 }
 
-/* ---------- MissingRow Component ---------- */
+/* ---------- MissingRow Component (cosmetic pass) ---------- */
 function MissingRow({
   no_mat,
   onAdd,
@@ -373,15 +527,15 @@ function MissingRow({
   const [busy, setBusy] = useState(false);
 
   return (
-    <tr className="border-t">
-      <td className="px-3 py-2">{no_mat}</td>
-      <td className="px-3 py-2">
+    <TableRow className="even:bg-muted/20">
+      <TableCell className="font-mono">{no_mat}</TableCell>
+      <TableCell>
         <Input value={mat_name} onChange={(e) => setMatName(e.target.value)} placeholder="mat_name" />
-      </td>
-      <td className="px-3 py-2">
+      </TableCell>
+      <TableCell>
         <Input value={category} onChange={(e) => setCategory(e.target.value)} placeholder="category" />
-      </td>
-      <td className="px-3 py-2">
+      </TableCell>
+      <TableCell>
         <Input
           type="number"
           value={qty ?? ""}
@@ -389,8 +543,8 @@ function MissingRow({
           placeholder="qty"
           className="w-24 text-right"
         />
-      </td>
-      <td className="px-3 py-2">
+      </TableCell>
+      <TableCell>
         <Input
           type="number"
           value={Price ?? ""}
@@ -398,11 +552,11 @@ function MissingRow({
           placeholder="Price"
           className="w-28 text-right"
         />
-      </td>
-      <td className="px-3 py-2">
+      </TableCell>
+      <TableCell>
         <Input value={UoM} onChange={(e) => setUoM(e.target.value)} placeholder="UoM" className="w-24" />
-      </td>
-      <td className="px-3 py-2">
+      </TableCell>
+      <TableCell className="text-center">
         <Button
           size="sm"
           disabled={busy}
@@ -417,7 +571,7 @@ function MissingRow({
         >
           {busy ? "Adding…" : "Add"}
         </Button>
-      </td>
-    </tr>
+      </TableCell>
+    </TableRow>
   );
 }
