@@ -374,71 +374,85 @@ export default function Actual() {
  // ⬇️ REPLACE your current graphData useMemo with this one
 const graphData = useMemo(() => {
   const { dates, w1, w2 } = weights;
+  const n = dates.length;
 
-  // Actual (unchanged): daily value by date
-  const actualByIdx = new Array(dates.length).fill(0);
+  // ==== Actual daily value (unchanged), then cumulative
+  const actualDaily = new Array(n).fill(0);
   for (const r of filteredActual) {
     const idx = dates.indexOf(r.posting_date);
-    if (idx >= 0) actualByIdx[idx] += r.value;
+    if (idx >= 0) actualDaily[idx] += r.value;
+  }
+  const cumActualByIdx = new Array(n).fill(0);
+  for (let i = 0; i < n; i++) {
+    cumActualByIdx[i] = +( (i ? cumActualByIdx[i-1] : 0) + actualDaily[i] ).toFixed(2);
   }
 
-  // Forecast: compute per-day per-material in UNITS, rounded by master.qty, then convert to VALUE
-  const midByIdx    = new Array(dates.length).fill(0); // raw (no rounding)
-  const lowerByIdx  = new Array(dates.length).fill(0); // floor to pack
-  const upperByIdx  = new Array(dates.length).fill(0); // ceil  to pack
+  // ==== Forecast cumulative with pack rounding (ceil/floor) on cumulative units per material
+  const cumMidByIdx   = new Array(n).fill(0); // cumulative mid value
+  const cumLowerByIdx = new Array(n).fill(0); // cumulative floor(value) by pack
+  const cumUpperByIdx = new Array(n).fill(0); // cumulative ceil(value)  by pack
 
   for (const r of filteredForecast) {
-    const arr = r.loc === 2 ? w2 : w1;
+    const weightsArr = r.loc === 2 ? w2 : w1;
     const pack = Math.max(1, safeNumber(masterMap[r.no_mat]?.quantity, 1)); // master.qty (pack size)
-    const unitPrice = vpu(r.no_mat); // value per ONE unit (price / qty)
+    const unitPrice = vpu(r.no_mat); // value per 1 unit
 
-    for (let i = 0; i < arr.length; i++) {
-      const dayQty = r.quantity * arr[i]; // daily UNITS (not value)
-      const floorQ = Math.floor(dayQty / pack) * pack;
-      const ceilQ  = Math.ceil(dayQty / pack) * pack;
+    // cumulative UNITS per day for this material
+    let cumUnits = 0;
+    for (let i = 0; i < n; i++) {
+      const dayUnits = r.quantity * weightsArr[i]; // UNITS for this day (not rounded)
+      cumUnits += dayUnits;
 
-      midByIdx[i]   += dayQty * unitPrice;
-      lowerByIdx[i] += floorQ * unitPrice;
-      upperByIdx[i] += ceilQ  * unitPrice;
+      // round cumulative UNITS to pack for lower/upper
+      const floorUnits = Math.floor(cumUnits / pack) * pack;
+      const ceilUnits  = Math.ceil(cumUnits / pack) * pack;
+
+      cumMidByIdx[i]   += cumUnits   * unitPrice;
+      cumLowerByIdx[i] += floorUnits * unitPrice;
+      cumUpperByIdx[i] += ceilUnits  * unitPrice;
     }
   }
 
-  // Build rows + cumulative
-  let cumA = 0, cumMid = 0, cumLo = 0, cumUp = 0;
+  // Build rows for charts (keep daily actual/forecast if you also render daily elsewhere)
+  // "forecast" below is still the mid *daily* value for your daily charts; compute it from diffs of cumMid
+  const dailyMidByIdx = new Array(n).fill(0);
+  for (let i = 0; i < n; i++) {
+    const prev = i ? cumMidByIdx[i-1] : 0;
+    dailyMidByIdx[i] = +(cumMidByIdx[i] - prev).toFixed(2);
+  }
+
   return dates.map((iso, i) => {
-    const a  = +actualByIdx[i].toFixed(2);
-    const m  = +midByIdx[i].toFixed(2);
-    const lo = +lowerByIdx[i].toFixed(2);
-    const up = +upperByIdx[i].toFixed(2);
+    const dateLabel = iso.slice(8, 10);
 
-    cumA  = +(cumA  + a ).toFixed(2);
-    cumMid= +(cumMid+ m ).toFixed(2);
-    cumLo = +(cumLo + lo).toFixed(2);
-    cumUp = +(cumUp + up).toFixed(2);
+    const cumA  = +cumActualByIdx[i].toFixed(2);
+    const cumM  = +cumMidByIdx[i].toFixed(2);
+    const cumLo = +cumLowerByIdx[i].toFixed(2);
+    const cumUp = +cumUpperByIdx[i].toFixed(2);
 
-    // bands relative to LOWER so we can stack areas (lower + bandBottom = mid; + bandTop = upper)
-    const bandBottom = +(cumMid - cumLo).toFixed(2);
-    const bandTop    = +(cumUp  - cumMid).toFixed(2);
+    // bands relative to LOWER so stacked areas can shade [lower→mid] and [mid→upper]
+    const bandBottom = +(cumM  - cumLo).toFixed(2);
+    const bandTop    = +(cumUp - cumM ).toFixed(2);
 
     return {
-      date: iso.slice(8, 10),
+      date: dateLabel,
 
-      // daily (keep if you still show daily charts elsewhere)
-      actual: a,
-      forecast: m,
+      // daily (for your other charts)
+      actual: +actualDaily[i].toFixed(2),
+      forecast: dailyMidByIdx[i],
 
-      // cumulative
+      // cumulative lines
       cumActual: cumA,
-      cumForecast: cumMid,
-      cumForecastLower: cumLo,
-      cumForecastUpper: cumUp,
+      cumForecast: cumM,            // mid
+      cumForecastLower: cumLo,      // floor by pack
+      cumForecastUpper: cumUp,      // ceil  by pack
 
-      // bands for shading between the three lines
-      bandBottom, // (cumForecast - cumForecastLower)
-      bandTop,    // (cumForecastUpper - cumForecast)
+      // shaded bands
+      bandBottom,
+      bandTop,
     };
   });
 }, [weights, filteredActual, filteredForecast, masterMap, vpu]);
+
 
 
   const sumA = useMemo(()=>graphData.reduce((s,r)=>s+r.actual,0),[graphData]);
