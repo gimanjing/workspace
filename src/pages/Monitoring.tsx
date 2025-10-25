@@ -12,19 +12,11 @@ import { Button } from "@/components/ui/button";
 import { CalendarDays, ChevronsUpDown, Check, Eye, EyeOff } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { supabase } from "@/lib/supabase";
-
-// shadcn table
 import {
-  Table,
-  TableBody,
-  TableCaption,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
+  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
 
-// Charts
+// Recharts
 import {
   ResponsiveContainer,
   BarChart, Bar,
@@ -88,16 +80,12 @@ function listMonthDates(year: number, month: number): string[] {
   }
   return days;
 }
-// Normalize odd date strings to "YYYY-MM-DD"
 function normalizeDateString(x: any): string | null {
   if (!x) return null;
   const s = String(x);
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s; // already ISO date
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
   const m = s.match(/(\d{4,5})-(\d{2})-(\d{2})/);
-  if (m) {
-    const yyyy = m[1].slice(-4);
-    return `${yyyy}-${m[2]}-${m[3]}`;
-  }
+  if (m) { const yyyy = m[1].slice(-4); return `${yyyy}-${m[2]}-${m[3]}`; }
   const m2 = s.match(/^(\d{4})(\d{2})(\d{2})$/);
   if (m2) return `${m2[1]}-${m2[2]}-${m2[3]}`;
   const d = new Date(s);
@@ -118,6 +106,8 @@ function normalizeCategory(raw: string | null | undefined): "Direct Material" | 
   if (["indirect", "indirect material", "im"].includes(s)) return "Indirect Material";
   return "Unassigned";
 }
+const fmtIDR = (n: number) =>
+  new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR", maximumFractionDigits: 0 }).format(n);
 
 /* =========================
    Page
@@ -243,10 +233,10 @@ export default function Actual() {
     let cancel = false;
     (async () => {
       const { start, end } = monthRange(filters.year, filters.month);
-      const startStr = fmtDate(start);               // e.g., 2025-09-01
-      const endStr = fmtDate(end);                   // e.g., 2025-09-30
+      const startStr = fmtDate(start);
+      const endStr = fmtDate(end);
       const nextMonthStart = new Date(Date.UTC(filters.year, filters.month, 1));
-      const nextStartStr = fmtDate(nextMonthStart);  // e.g., 2025-10-01
+      const nextStartStr = fmtDate(nextMonthStart);
 
       const qa = supabase.from("actual")
         .select("no_mat, posting_date, quantity, dept")
@@ -258,33 +248,25 @@ export default function Actual() {
         .gte("month", startStr)
         .lt("month", nextStartStr);
 
-      const [{ data: a, error: ea }, { data: f, error: ef }] = await Promise.all([qa, qf]);
+      const [{ data: a }, { data: f }] = await Promise.all([qa, qf]);
       if (cancel) return;
 
-      if (!ea && a) {
-        setActualRows(a.map((r: any) => {
-          const d = normalizeDateString(r.posting_date);
-          return {
-            no_mat: String(r.no_mat),
-            posting_date: d ?? "",
-            quantity: safeNumber(r.quantity),
-            dept: r.dept ?? null,
-          };
-        }).filter(r => !!r.posting_date));
-      } else {
-        setActualRows([]);
-      }
-
-      if (!ef && f) {
-        setForecastRows(f.map((r: any) => ({
+      setActualRows((a ?? []).map((r: any) => {
+        const d = normalizeDateString(r.posting_date);
+        return {
           no_mat: String(r.no_mat),
-          shop: r.shop ?? null,
-          quantity: safeNumber(r.usage),   // usage → quantity
-          month: normalizeDateString(r.month) ?? null,
-        })));
-      } else {
-        setForecastRows([]);
-      }
+          posting_date: d ?? "",
+          quantity: safeNumber(r.quantity),
+          dept: r.dept ?? null,
+        };
+      }).filter(r => !!r.posting_date));
+
+      setForecastRows((f ?? []).map((r: any) => ({
+        no_mat: String(r.no_mat),
+        shop: r.shop ?? null,
+        quantity: safeNumber(r.usage),   // usage -> quantity
+        month: normalizeDateString(r.month) ?? null,
+      })));
     })();
     return () => { cancel = true; };
   }, [filters.year, filters.month]);
@@ -300,7 +282,6 @@ export default function Actual() {
       const target = (filters.deptSelected ?? "").trim();
       return (rowDept?.trim() === target) || (rowShop?.trim() === target);
     }
-    // "unassigned": include empty/null or values not in shop.dept
     const v = (rowDept ?? rowShop ?? "").trim();
     return v === "" || !deptSet.has(v);
   }, [filters.deptMode, filters.deptSelected, deptSet]);
@@ -319,9 +300,8 @@ export default function Actual() {
   }, [masterMap]);
 
   /* =========================
-     DEBUGGING TABLE DATA
+     DEBUG DATA
   ========================= */
-  // Filtered actual/forecast rows (no aggregation)
   const filteredActual = useMemo(() => {
     return actualRows.filter(r =>
       isMaterialAllowed(r.no_mat) &&
@@ -348,7 +328,7 @@ export default function Actual() {
     }));
   }, [forecastRows, isDeptAllowed, isMaterialAllowed, shopMap, vpu]);
 
-  // Pagination state
+  // Pagination
   const [pageA, setPageA] = useState(1);
   const [pageF, setPageF] = useState(1);
   const [pageSizeA, setPageSizeA] = useState(20);
@@ -370,7 +350,7 @@ export default function Actual() {
   const pagesF = Math.max(1, Math.ceil(filteredForecast.length / pageSizeF));
 
   /* =========================
-     GRAPH AGGREGATION (optimized)
+     GRAPH AGGREGATION
   ========================= */
   const graphModeDates = useMemo(() => listMonthDates(filters.year, filters.month), [filters.year, filters.month]);
 
@@ -390,14 +370,12 @@ export default function Actual() {
   const graphData = useMemo(() => {
     const { dates, w1, w2 } = weights;
 
-    // Actual per day by index
     const actualByIdx = new Array(dates.length).fill(0);
     for (const r of filteredActual) {
       const idx = dates.indexOf(r.posting_date);
       if (idx >= 0) actualByIdx[idx] += r.value;
     }
 
-    // Forecast per day using precomputed weights
     const forecastByIdx = new Array(dates.length).fill(0);
     for (const r of filteredForecast) {
       const arr = (r.loc === 2) ? w2 : w1;
@@ -421,6 +399,9 @@ export default function Actual() {
     });
   }, [weights, filteredActual, filteredForecast]);
 
+  const sumA = useMemo(()=>graphData.reduce((s,r)=>s+r.actual,0),[graphData]);
+  const sumF = useMemo(()=>graphData.reduce((s,r)=>s+r.forecast,0),[graphData]);
+
   /* =========================
      UI
   ========================= */
@@ -432,11 +413,11 @@ export default function Actual() {
 
       <main className="min-w-0 overflow-x-hidden">
         <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 dark:from-slate-950 dark:to-slate-900 p-8">
-          <div className="container mx-auto p-6 space-y-6">
+          <div className="container mx-auto p-6 space-y-6 max-w-[1400px]">
             {/* Filters */}
-            <Card className="border-dashed">
+            <Card className="border-dashed shadow-sm">
               <CardHeader className="pb-2">
-                <CardTitle className="text-base">Filters</CardTitle>
+                <CardTitle className="text-sm font-semibold tracking-tight">Filters</CardTitle>
               </CardHeader>
               <CardContent>
                 <FiltersUI filters={filters} setFilters={setFilters} deptOptions={deptOptions} />
@@ -450,12 +431,7 @@ export default function Actual() {
               </div>
               <div className="flex items-center gap-2">
                 <Label className="mr-2">Show tables</Label>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setShowDebug((s) => !s)}
-                  className="gap-2"
-                >
+                <Button variant="outline" size="sm" onClick={() => setShowDebug((s) => !s)} className="gap-2">
                   {showDebug ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                   {showDebug ? "Hide" : "Show"}
                 </Button>
@@ -484,17 +460,15 @@ export default function Actual() {
                               <SelectItem value="50">50</SelectItem>
                             </SelectContent>
                           </Select>
-                          <div className="text-xs text-muted-foreground">
-                            Page {pageF} / {pagesF}
-                          </div>
+                          <div className="text-xs text-muted-foreground">Page {pageF} / {pagesF}</div>
                           <div className="flex gap-2">
                             <Button variant="outline" size="sm" onClick={() => setPageF(p => Math.max(1, p - 1))}>Prev</Button>
                             <Button variant="outline" size="sm" onClick={() => setPageF(p => Math.min(pagesF, p + 1))}>Next</Button>
                           </div>
                         </div>
                       </div>
-                      <div className="rounded-lg border overflow-auto max-h=[360px] lg:max-h-[360px]">
-                        <Table>
+                      <div className="rounded-xl border overflow-auto max-h-[360px]">
+                        <Table className="[&_th]:sticky [&_th]:top-0 [&_th]:z-10 [&_th]:bg-background [&_tbody_tr:nth-child(even)]:bg-muted/30">
                           <TableHeader>
                             <TableRow>
                               <TableHead>Shop</TableHead>
@@ -510,8 +484,8 @@ export default function Actual() {
                                 <TableCell>{r.shop}</TableCell>
                                 <TableCell>{r.loc}</TableCell>
                                 <TableCell className="font-mono">{r.no_mat}</TableCell>
-                                <TableCell className="text-right">{r.quantity}</TableCell>
-                                <TableCell className="text-right">{r.value.toLocaleString()}</TableCell>
+                                <TableCell className="text-right tabular-nums">{r.quantity}</TableCell>
+                                <TableCell className="text-right tabular-nums">{fmtIDR(r.value)}</TableCell>
                               </TableRow>
                             ))}
                             {pagedForecast.length === 0 && (
@@ -538,17 +512,15 @@ export default function Actual() {
                               <SelectItem value="50">50</SelectItem>
                             </SelectContent>
                           </Select>
-                          <div className="text-xs text-muted-foreground">
-                            Page {pageA} / {pagesA}
-                          </div>
+                          <div className="text-xs text-muted-foreground">Page {pageA} / {pagesA}</div>
                           <div className="flex gap-2">
                             <Button variant="outline" size="sm" onClick={() => setPageA(p => Math.max(1, p - 1))}>Prev</Button>
                             <Button variant="outline" size="sm" onClick={() => setPageA(p => Math.min(pagesA, p + 1))}>Next</Button>
                           </div>
                         </div>
                       </div>
-                      <div className="rounded-lg border overflow-auto max-h=[360px] lg:max-h-[360px]">
-                        <Table>
+                      <div className="rounded-xl border overflow-auto max-h-[360px]">
+                        <Table className="[&_th]:sticky [&_th]:top-0 [&_th]:z-10 [&_th]:bg-background [&_tbody_tr:nth-child(even)]:bg-muted/30">
                           <TableHeader>
                             <TableRow>
                               <TableHead>Date</TableHead>
@@ -564,8 +536,8 @@ export default function Actual() {
                                 <TableCell className="font-mono">{r.posting_date}</TableCell>
                                 <TableCell>{r.dept}</TableCell>
                                 <TableCell className="font-mono">{r.no_mat}</TableCell>
-                                <TableCell className="text-right">{r.quantity}</TableCell>
-                                <TableCell className="text-right">{r.value.toLocaleString()}</TableCell>
+                                <TableCell className="text-right tabular-nums">{r.quantity}</TableCell>
+                                <TableCell className="text-right tabular-nums">{fmtIDR(r.value)}</TableCell>
                               </TableRow>
                             ))}
                             {pagedActual.length === 0 && (
@@ -582,16 +554,14 @@ export default function Actual() {
               </Card>
             )}
 
-            {/* Graphs */}
+            {/* KPIs + Graphs */}
             <Card>
               <CardHeader className="flex items-center justify-between gap-4">
                 <CardTitle>Graphs</CardTitle>
                 <div className="flex items-center gap-3">
                   <Label>Graph</Label>
                   <Select value={graphMode} onValueChange={(v) => setGraphMode(v as GraphMode)}>
-                    <SelectTrigger className="w-56">
-                      <SelectValue />
-                    </SelectTrigger>
+                    <SelectTrigger className="w-56"><SelectValue /></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="Combination">Combination</SelectItem>
                       <SelectItem value="Daily Control">Daily Control</SelectItem>
@@ -601,9 +571,31 @@ export default function Actual() {
                 </div>
               </CardHeader>
               <CardContent className="space-y-4">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  {[
+                    { label: "Actual (MTD)", value: sumA },
+                    { label: "Forecast (MTD)", value: sumF },
+                    { label: "Gap (A - F)", value: sumA - sumF },
+                  ].map(k => (
+                    <div
+                      key={k.label}
+                      className={cn(
+                        "rounded-2xl border p-4",
+                        k.label === "Gap (A - F)" && (k.value >= 0
+                          ? "bg-emerald-50/60 dark:bg-emerald-950/30 border-emerald-200/50"
+                          : "bg-rose-50/60 dark:bg-rose-950/30 border-rose-200/50")
+                      )}
+                    >
+                      <div className="text-xs text-muted-foreground">{k.label}</div>
+                      <div className="text-lg font-semibold tracking-tight">{fmtIDR(k.value)}</div>
+                    </div>
+                  ))}
+                </div>
+
                 <GraphBlock mode={graphMode} data={graphData} />
+
                 <div className="text-xs text-muted-foreground">
-                  days: {graphData.length} • sumA: {graphData.reduce((s,r)=>s+r.actual,0).toFixed(2)} • sumF: {graphData.reduce((s,r)=>s+r.forecast,0).toFixed(2)}
+                  days: {graphData.length} • sumA: {fmtIDR(sumA)} • sumF: {fmtIDR(sumF)}
                 </div>
               </CardContent>
             </Card>
@@ -635,26 +627,18 @@ function FiltersUI({
         <Label>Month</Label>
         <div className="flex gap-2">
           <Select value={String(filters.month)} onValueChange={(v) => setFilters(f => ({ ...f, month: Number(v) }))}>
-            <SelectTrigger className="w-44">
-              <SelectValue placeholder="Month" />
-            </SelectTrigger>
+            <SelectTrigger className="w-44"><SelectValue placeholder="Month" /></SelectTrigger>
             <SelectContent>
               {MONTHS.map(m => (<SelectItem key={m.value} value={String(m.value)}>{m.label}</SelectItem>))}
             </SelectContent>
           </Select>
           <Select value={String(filters.year)} onValueChange={(v) => setFilters(f => ({ ...f, year: Number(v) }))}>
-            <SelectTrigger className="w-28">
-              <SelectValue placeholder="Year" />
-            </SelectTrigger>
+            <SelectTrigger className="w-28"><SelectValue placeholder="Year" /></SelectTrigger>
             <SelectContent>
               {YEARS.map(y => (<SelectItem key={y} value={String(y)}>{y}</SelectItem>))}
             </SelectContent>
           </Select>
-          <Button
-            variant="outline"
-            className="gap-2"
-            onClick={() => setFilters(f => ({ ...f, month: now.getMonth() + 1, year: now.getFullYear() }))}
-          >
+          <Button variant="outline" className="gap-2 h-9" onClick={() => setFilters(f => ({ ...f, month: now.getMonth() + 1, year: now.getFullYear() }))}>
             <CalendarDays className="h-4 w-4" /> This month
           </Button>
         </div>
@@ -667,20 +651,14 @@ function FiltersUI({
       <div className="md:col-span-4 space-y-2">
         <Label>Department</Label>
         <div className="flex gap-2">
-          <Select
-            value={filters.deptMode}
-            onValueChange={(v: DeptMode) => setFilters(f => ({ ...f, deptMode: v }))}
-          >
-            <SelectTrigger className="w-40">
-              <SelectValue />
-            </SelectTrigger>
+          <Select value={filters.deptMode} onValueChange={(v: DeptMode) => setFilters(f => ({ ...f, deptMode: v }))}>
+            <SelectTrigger className="w-40"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value="all">All</SelectItem>
               <SelectItem value="list">List</SelectItem>
               <SelectItem value="unassigned">Unassigned</SelectItem>
             </SelectContent>
           </Select>
-
           {filters.deptMode === "list" && (
             <DeptCombobox
               value={filters.deptSelected}
@@ -699,13 +677,8 @@ function FiltersUI({
       {/* Material */}
       <div className="md:col-span-4 space-y-2">
         <Label>Material</Label>
-        <Select
-          value={filters.material}
-          onValueChange={(v: MaterialOpt) => setFilters(f => ({ ...f, material: v }))}
-        >
-          <SelectTrigger className="w-60">
-            <SelectValue />
-          </SelectTrigger>
+        <Select value={filters.material} onValueChange={(v: MaterialOpt) => setFilters(f => ({ ...f, material: v }))}>
+          <SelectTrigger className="w-60"><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value="all">All</SelectItem>
             <SelectItem value="Direct Material">Direct Material</SelectItem>
@@ -713,9 +686,7 @@ function FiltersUI({
             <SelectItem value="Unassigned">Unassigned</SelectItem>
           </SelectContent>
         </Select>
-        <p className="text-xs text-muted-foreground">
-          Based on <span className="font-mono">master.category</span>.
-        </p>
+        <p className="text-xs text-muted-foreground">Based on <span className="font-mono">master.category</span>.</p>
       </div>
     </div>
   );
@@ -734,11 +705,7 @@ function DeptCombobox({
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
-        <Button
-          variant="outline"
-          role="combobox"
-          className={cn("w-56 justify-between", !value && "text-muted-foreground")}
-        >
+        <Button variant="outline" role="combobox" className={cn("w-56 justify-between", !value && "text-muted-foreground")}>
           {value || "Select department"}
           <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
         </Button>
@@ -749,11 +716,7 @@ function DeptCombobox({
           <CommandEmpty>No department found.</CommandEmpty>
           <CommandGroup>
             {options.map((dept) => (
-              <CommandItem
-                key={dept}
-                value={dept}
-                onSelect={(v) => { onSelect(v); setOpen(false); }}
-              >
+              <CommandItem key={dept} value={dept} onSelect={(v) => { onSelect(v); setOpen(false); }}>
                 <Check className={cn("mr-2 h-4 w-4", dept === value ? "opacity-100" : "opacity-0")} />
                 {dept}
               </CommandItem>
@@ -766,39 +729,27 @@ function DeptCombobox({
 }
 
 /* =========================
-   Graph Block
-========================= */
-/* =========================
-   Graph Block (blue/green)
+   Graph Block (shadcn-themed)
 ========================= */
 function GraphBlock({ mode, data }: { mode: GraphMode; data: any[] }) {
-  // Tailwind palette picks:
-  // Blue  = #2563eb (blue-600)
-  // Green = #10b981 (emerald-500)
-  const BLUE  = "#2563eb";
-  const GREEN = "#10b981";
+  // Use shadcn CSS tokens so colors track theme
+  const BLUE  = "hsl(var(--chart-1))"; // Actual
+  const GREEN = "hsl(var(--chart-2))"; // Forecast
 
-  const ChartDefs = () => (
-    <defs>
-      {/* Blue gradient for Actual bars */}
-      <linearGradient id="barActualBlue" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0%"  stopColor={BLUE}  stopOpacity={0.95} />
-        <stop offset="100%" stopColor={BLUE} stopOpacity={0.65} />
-      </linearGradient>
-      {/* Green gradient for Forecast bars */}
-      <linearGradient id="barForecastGreen" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0%"  stopColor={GREEN} stopOpacity={0.90} />
-        <stop offset="100%" stopColor={GREEN} stopOpacity={0.60} />
-      </linearGradient>
-    </defs>
-  );
-
-  const Common = {
-    grid: <CartesianGrid strokeDasharray="3 3" opacity={0.25} />,
-    x: <XAxis dataKey="date" />,
-    y: <YAxis />,
-    tt: <Tooltip />,
-    lg: <Legend />,
+  // Tailored tooltip that uses shadcn surfaces
+  const ChartTooltip = ({ active, payload, label }: any) => {
+    if (!active || !payload?.length) return null;
+    const map: Record<string, number> = {};
+    payload.forEach((p: any) => { map[p.name] = p.value; });
+    return (
+      <div className="rounded-md border bg-popover p-3 text-popover-foreground shadow-sm">
+        <div className="text-xs font-medium">Day {label}</div>
+        {"Actual" in map && <div className="text-xs">Actual: <span className="font-mono">{fmtIDR(map["Actual"])}</span></div>}
+        {"Forecast" in map && <div className="text-xs">Forecast: <span className="font-mono">{fmtIDR(map["Forecast"])}</span></div>}
+        {"Cum Actual" in map && <div className="text-xs">Cum A: <span className="font-mono">{fmtIDR(map["Cum Actual"])}</span></div>}
+        {"Cum Forecast" in map && <div className="text-xs">Cum F: <span className="font-mono">{fmtIDR(map["Cum Forecast"])}</span></div>}
+      </div>
+    );
   };
 
   if (mode === "Daily Control") {
@@ -806,10 +757,13 @@ function GraphBlock({ mode, data }: { mode: GraphMode; data: any[] }) {
       <div className="h-[420px]">
         <ResponsiveContainer width="100%" height="100%">
           <BarChart data={data}>
-            <ChartDefs />
-            {Common.grid}{Common.x}{Common.y}{Common.tt}{Common.lg}
-            <Bar dataKey="actual"   name="Actual"   radius={[6,6,0,0]} fill="url(#barActualBlue)" />
-            <Bar dataKey="forecast" name="Forecast" radius={[6,6,0,0]} fill="url(#barForecastGreen)" />
+            <CartesianGrid strokeDasharray="3 3" opacity={0.25} />
+            <XAxis dataKey="date" />
+            <YAxis />
+            <Tooltip content={<ChartTooltip />} />
+            <Legend />
+            <Bar dataKey="actual"   name="Actual"   fill={BLUE}  stroke={BLUE}  radius={[6,6,0,0]} />
+            <Bar dataKey="forecast" name="Forecast" fill={GREEN} stroke={GREEN} radius={[6,6,0,0]} />
           </BarChart>
         </ResponsiveContainer>
       </div>
@@ -821,8 +775,11 @@ function GraphBlock({ mode, data }: { mode: GraphMode; data: any[] }) {
       <div className="h-[420px]">
         <ResponsiveContainer width="100%" height="100%">
           <LineChart data={data}>
-            <ChartDefs />
-            {Common.grid}{Common.x}{Common.y}{Common.tt}{Common.lg}
+            <CartesianGrid strokeDasharray="3 3" opacity={0.25} />
+            <XAxis dataKey="date" />
+            <YAxis />
+            <Tooltip content={<ChartTooltip />} />
+            <Legend />
             <Line type="monotone" dataKey="cumActual"   name="Cum Actual"   dot={false} strokeWidth={2} stroke={BLUE}  />
             <Line type="monotone" dataKey="cumForecast" name="Cum Forecast" dot={false} strokeWidth={2} stroke={GREEN} />
           </LineChart>
@@ -836,15 +793,14 @@ function GraphBlock({ mode, data }: { mode: GraphMode; data: any[] }) {
     <div className="h-[460px]">
       <ResponsiveContainer width="100%" height="100%">
         <BarChart data={data}>
-          <ChartDefs />
           <CartesianGrid strokeDasharray="3 3" opacity={0.25} />
           <XAxis dataKey="date" />
           <YAxis yAxisId="left" />
           <YAxis yAxisId="right" orientation="right" />
-          <Tooltip />
+          <Tooltip content={<ChartTooltip />} />
           <Legend />
-          <Bar  yAxisId="left"  dataKey="actual"      name="Actual (Daily)"   radius={[6,6,0,0]} fill="url(#barActualBlue)" />
-          <Bar  yAxisId="left"  dataKey="forecast"    name="Forecast (Daily)" radius={[6,6,0,0]} fill="url(#barForecastGreen)" />
+          <Bar  yAxisId="left"  dataKey="actual"      name="Actual"            fill={BLUE}  stroke={BLUE}  radius={[6,6,0,0]} />
+          <Bar  yAxisId="left"  dataKey="forecast"    name="Forecast"          fill={GREEN} stroke={GREEN} radius={[6,6,0,0]} />
           <Line yAxisId="right" type="monotone" dataKey="cumActual"   name="Cum Actual"   dot={false} strokeWidth={2} stroke={BLUE}  />
           <Line yAxisId="right" type="monotone" dataKey="cumForecast" name="Cum Forecast" dot={false} strokeWidth={2} stroke={GREEN} />
         </BarChart>
