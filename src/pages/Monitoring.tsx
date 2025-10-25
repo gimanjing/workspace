@@ -731,14 +731,13 @@ function DeptCombobox({
 }
 
 /* =========================
-   Graph Block (shadcn-themed)
+   Graph Block (no grid)
 ========================= */
 function GraphBlock({ mode, data }: { mode: GraphMode; data: any[] }) {
-  // Use shadcn CSS tokens so colors track theme
   const BLUE  = "hsl(var(--chart-1))"; // Actual
   const GREEN = "hsl(var(--chart-2))"; // Forecast
+  const yTick = (v: number) => new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(v);
 
-  // Tailored tooltip that uses shadcn surfaces
   const ChartTooltip = ({ active, payload, label }: any) => {
     if (!active || !payload?.length) return null;
     const map: Record<string, number> = {};
@@ -754,17 +753,13 @@ function GraphBlock({ mode, data }: { mode: GraphMode; data: any[] }) {
     );
   };
 
-  // Compact currency for Y-axis ticks
-  const yTick = (v: number) => fmtIDRCompact(v);
-
   if (mode === "Daily Control") {
     return (
       <div className="h-[420px]">
         <ResponsiveContainer width="100%" height="100%">
           <BarChart data={data}>
-            <CartesianGrid strokeDasharray="3 3" opacity={0.25} />
-            <XAxis dataKey="date" />
-            <YAxis tickFormatter={yTick} />
+            <XAxis dataKey="date" axisLine={false} tickLine={false} />
+            <YAxis tickFormatter={yTick} axisLine={false} tickLine={false} />
             <Tooltip content={<ChartTooltip />} />
             <Legend />
             <Bar dataKey="actual"   name="Actual"   fill={BLUE}  stroke={BLUE}  radius={[6,6,0,0]} />
@@ -780,9 +775,8 @@ function GraphBlock({ mode, data }: { mode: GraphMode; data: any[] }) {
       <div className="h-[420px]">
         <ResponsiveContainer width="100%" height="100%">
           <LineChart data={data}>
-            <CartesianGrid strokeDasharray="3 3" opacity={0.25} />
-            <XAxis dataKey="date" />
-            <YAxis tickFormatter={yTick} />
+            <XAxis dataKey="date" axisLine={false} tickLine={false} />
+            <YAxis tickFormatter={yTick} axisLine={false} tickLine={false} />
             <Tooltip content={<ChartTooltip />} />
             <Legend />
             <Line type="monotone" dataKey="cumActual"   name="Cum Actual"   dot={false} strokeWidth={2} stroke={BLUE}  />
@@ -798,10 +792,9 @@ function GraphBlock({ mode, data }: { mode: GraphMode; data: any[] }) {
     <div className="h-[460px]">
       <ResponsiveContainer width="100%" height="100%">
         <BarChart data={data}>
-          <CartesianGrid strokeDasharray="3 3" opacity={0.25} />
-          <XAxis dataKey="date" />
-          <YAxis yAxisId="left" tickFormatter={yTick} />
-          <YAxis yAxisId="right" orientation="right" tickFormatter={yTick} />
+          <XAxis dataKey="date" axisLine={false} tickLine={false} />
+          <YAxis yAxisId="left"  tickFormatter={yTick} axisLine={false} tickLine={false} />
+          <YAxis yAxisId="right" tickFormatter={yTick} orientation="right" axisLine={false} tickLine={false} />
           <Tooltip content={<ChartTooltip />} />
           <Legend />
           <Bar  yAxisId="left"  dataKey="actual"      name="Actual"            fill={BLUE}  stroke={BLUE}  radius={[6,6,0,0]} />
