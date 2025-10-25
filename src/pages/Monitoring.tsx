@@ -595,6 +595,11 @@ export default function Actual() {
                 </div>
 
                 <GraphBlock mode={graphMode} data={graphData} />
+                <div className="mt-6">
+  <div className="mb-2 text-sm text-muted-foreground">Cumulative (MTD)</div>
+  <CumulativeChart data={graphData} />
+</div>
+
 
                 <div className="text-xs text-muted-foreground">
                   days: {graphData.length} • sumA: {fmtIDR(sumA)} • sumF: {fmtIDR(sumF)}
@@ -802,6 +807,70 @@ function GraphBlock({ mode, data }: { mode: GraphMode; data: any[] }) {
           <Line yAxisId="right" type="monotone" dataKey="cumActual"   name="Cum Actual"   dot={false} strokeWidth={2} stroke={BLUE}  />
           <Line yAxisId="right" type="monotone" dataKey="cumForecast" name="Cum Forecast" dot={false} strokeWidth={2} stroke={GREEN} />
         </BarChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+/* =========================
+   Cumulative Chart (always shown)
+========================= */
+function CumulativeChart({ data }: { data: any[] }) {
+  const BLUE  = "hsl(var(--chart-1))"; // Cum Actual
+  const GREEN = "hsl(var(--chart-2))"; // Cum Forecast
+  const yTick = (v: number) =>
+    new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(v);
+
+  const ChartTooltip = ({ active, payload, label }: any) => {
+    if (!active || !payload?.length) return null;
+    const map: Record<string, number> = {};
+    payload.forEach((p: any) => { map[p.name] = p.value; });
+    return (
+      <div className="rounded-md border bg-popover p-3 text-popover-foreground shadow-sm">
+        <div className="text-xs font-medium">Day {label}</div>
+        {"Cum Actual" in map && (
+          <div className="text-xs">
+            Cum A: <span className="font-mono">
+              {new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR", maximumFractionDigits: 0 }).format(map["Cum Actual"])}
+            </span>
+          </div>
+        )}
+        {"Cum Forecast" in map && (
+          <div className="text-xs">
+            Cum F: <span className="font-mono">
+              {new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR", maximumFractionDigits: 0 }).format(map["Cum Forecast"])}
+            </span>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <div className="h-[420px]">
+      <ResponsiveContainer width="100%" height="100%">
+        <LineChart data={data}>
+          {/* no grid */}
+          <XAxis dataKey="date" axisLine={false} tickLine={false} />
+          <YAxis tickFormatter={yTick} axisLine={false} tickLine={false} />
+          <Tooltip content={<ChartTooltip />} />
+          <Legend />
+          <Line
+            type="monotone"
+            dataKey="cumActual"
+            name="Cum Actual"
+            dot={false}
+            strokeWidth={2}
+            stroke={BLUE}
+          />
+          <Line
+            type="monotone"
+            dataKey="cumForecast"
+            name="Cum Forecast"
+            dot={false}
+            strokeWidth={2}
+            stroke={GREEN}
+          />
+        </LineChart>
       </ResponsiveContainer>
     </div>
   );
