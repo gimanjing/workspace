@@ -1,315 +1,388 @@
+// app/actual/page.tsx
 "use client";
 
-import { useEffect, useState } from "react";
-import readXlsxFile from "read-excel-file";
-import { supabase } from "@/lib/supabase";
+import { useEffect, useMemo, useState } from "react";
 import { Navigation } from "@/components/navigation";
-import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { toast } from "sonner";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem } from "@/components/ui/command";
+import { Button } from "@/components/ui/button";
+import { CalendarDays, ChevronsUpDown, Check, Eye, EyeOff } from "lucide-react";
+import { cn } from "@/lib/utils";
+import { supabase } from "@/lib/supabase";
 
-/* ---------- Types ---------- */
-type ActualRow = {
-  no_mat: string;
-  dept: string;                 // mapped or "Unassigned"
-  quantity: number | null;
-  posting_date: string;
-  document_date: string;
-};
+// shadcn table
+import {
+  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
+} from "@/components/ui/table";
 
-type MasterRow = {
-  no_mat: string;
-  mat_name: string;
-  category: string;
-  qty: number | null;
-  Price: number | null;
-  UoM: string;
-  created_at?: string;
-  updated_at?: string;
-};
+// recharts
+import {
+  ResponsiveContainer,
+  BarChart, Bar,
+  LineChart, Line,
+  XAxis, YAxis, CartesianGrid, Tooltip, Legend,
+} from "recharts";
 
-type ShopRow = {
-  code: string;
-  dept: string;
-  loc: string | null;
-};
-
-/* ---------- Config ---------- */
-const DEFAULT_DEPT = "Unassigned";
-
-/* ---------- Helpers ---------- */
-function normalizeHeader(h: string) {
-  return h.trim().toLowerCase().replace(/\s+/g, " ");
+/* =========================
+   Types
+========================= */
+interface MasterRow { no_mat: string; price: number; quantity: number; category: string | null }
+interface ActualRow  { no_mat: string; posting_date: string; quantity: number; dept: string | null }
+interface ForecastRow {
+  no_mat: string;          // normalized
+  shop: string | null;     // normalized dept name
+  usage: number;           // monthly usage
+  month: string | null;    // "YYYY-MM"
+  month_label?: string | null;
 }
-function excelSerialToYmd(n: number) {
-  const ms = (n - 25569) * 86400000;
-  const d = new Date(ms);
-  if (isNaN(d.getTime())) return "";
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const day = String(d.getUTCDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
+
+type DeptMode = "all" | "list" | "unassigned";
+type MaterialOpt = "all" | "Direct Material" | "Indirect Material" | "Unassigned";
+interface FilterState {
+  month: number;
+  year: number;
+  deptMode: DeptMode;
+  deptSelected?: string;
+  material: MaterialOpt;
 }
-function toYmd(v: string | number | Date | null | undefined) {
-  if (v == null) return "";
-  if (v instanceof Date) {
-    const y = v.getFullYear();
-    const m = String(v.getMonth() + 1).padStart(2, "0");
-    const d = String(v.getDate()).padStart(2, "0");
-    return `${y}-${m}-${d}`;
+type GraphMode = "Combination" | "Daily Control" | "Accumulative Control";
+
+/* =========================
+   Constants
+========================= */
+const THIS_YEAR = new Date().getFullYear();
+const YEARS = Array.from({ length: 7 }, (_, i) => THIS_YEAR - 3 + i);
+const MONTHS = [
+  { value: 1, label: "January" }, { value: 2, label: "February" }, { value: 3, label: "March" },
+  { value: 4, label: "April" },   { value: 5, label: "May" },      { value: 6, label: "June" },
+  { value: 7, label: "July" },    { value: 8, label: "August" },   { value: 9, label: "September" },
+  { value: 10, label: "October" },{ value: 11, label: "November" },{ value: 12, label: "December" },
+];
+
+/* =========================
+   Helpers
+========================= */
+const fmtDate = (d: Date) => d.toISOString().slice(0, 10); // YYYY-MM-DD
+const ymOf = (y: number, m: number) => `${y}-${String(m).padStart(2, "0")}`;
+
+function monthRange(year: number, month: number) {
+  const start = new Date(Date.UTC(year, month - 1, 1));
+  const end = new Date(Date.UTC(year, month, 0));
+  return { start, end };
+}
+function listMonthDates(year: number, month: number): string[] {
+  const { start, end } = monthRange(year, month);
+  const days: string[] = [];
+  const cur = new Date(start);
+  while (cur <= end) {
+    days.push(fmtDate(cur));
+    cur.setUTCDate(cur.getUTCDate() + 1);
   }
-  if (typeof v === "number") return excelSerialToYmd(v);
-  const s = String(v).trim();
-  if (!s) return "";
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-  const d = new Date(s);
-  if (!isNaN(d.getTime())) {
-    const y = d.getFullYear();
-    const m = String(d.getMonth() + 1).padStart(2, "0");
-    const day = String(d.getDate()).padStart(2, "0");
-    return `${y}-${m}-${day}`;
-  }
-  const m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
+  return days;
+}
+// Normalize odd date strings like "20225-09-01" or "20250901" to "YYYY-MM-DD"
+function normalizeDateString(x: any): string | null {
+  if (!x) return null;
+  const s = String(x);
+  const m = s.match(/(\d{4,5})-(\d{2})-(\d{2})/);
   if (m) {
-    const dd = m[1].padStart(2, "0");
-    const mo = m[2].padStart(2, "0");
-    const yy = m[3].length === 2 ? `20${m[3]}` : m[3];
-    return `${yy}-${mo}-${dd}`;
+    const yyyy = m[1].slice(-4);
+    return `${yyyy}-${m[2]}-${m[3]}`;
   }
-  return s;
+  const m2 = s.match(/^(\d{4})(\d{2})(\d{2})$/);
+  if (m2) return `${m2[1]}-${m2[2]}-${m2[3]}`;
+  const d = new Date(s);
+  if (!Number.isNaN(d.getTime())) return d.toISOString().slice(0, 10);
+  return null;
 }
+function safeNumber(n: any, d = 0) { const x = Number(n); return Number.isFinite(x) ? x : d; }
 
-// only .xlsx up to 8 MB
-const ALLOWED_EXT = [".xlsx"];
-const MAX_BYTES = 8 * 1024 * 1024;
-function isAllowedExcel(file: File) {
-  const name = file.name.toLowerCase();
-  const extOk = ALLOWED_EXT.some((e) => name.endsWith(e));
-  const sizeOk = file.size <= MAX_BYTES;
-  const mimeOk =
-    file.type === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" || file.type === "";
-  return extOk && sizeOk && mimeOk;
-}
+// string/keys normalizers
+const keyNM    = (x: any) => String(x ?? "").trim().toUpperCase(); // for no_mat join
+const norm     = (x: any) => String(x ?? "").trim();               // for dept/shop
+const normLower= (x: any) => norm(x).toLowerCase();
 
-// Parse first sheet → { headers, rows }
-async function parseExcel(file: File): Promise<{ headers: string[]; rows: any[][] }> {
-  const rows = await readXlsxFile(file, { sheet: 1 });
-  if (!rows?.length) return { headers: [], rows: [] };
-  const [headerRow, ...rest] = rows;
-  const headers = (headerRow ?? []).map((h: any) => String(h ?? "").trim());
-  return { headers, rows: rest as any[][] };
-}
-
-function chunk<T>(arr: T[], size = 500) {
-  const out: T[][] = [];
-  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
-  return out;
-}
-function nextMonthStart(dateYmd: string) {
-  const [y, m] = dateYmd.split("-").map(Number);
-  const d = new Date(y, m - 1, 1);
-  d.setMonth(d.getMonth() + 1);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-01`;
-}
-
-/* ---------- Page ---------- */
+/* =========================
+   Page
+========================= */
 export default function Actual() {
-  const [file, setFile] = useState<File | null>(null);
-  const [fileKey, setFileKey] = useState(0);
-  const [preview, setPreview] = useState<ActualRow[]>([]);
-  const [missing, setMissing] = useState<string[]>([]);
-  const [busy, setBusy] = useState(false);
-  const [shopOpen, setShopOpen] = useState(false);
+  const now = new Date();
+  const [filters, setFilters] = useState<FilterState>({
+    month: now.getMonth() + 1,
+    year: now.getFullYear(),
+    deptMode: "all",
+    material: "all",
+  });
+  const [graphMode, setGraphMode] = useState<GraphMode>("Combination");
+  const [showDebug, setShowDebug] = useState(false);
 
+  // dept options from shop.dept
+  const [deptOptions, setDeptOptions] = useState<string[]>([]);
   useEffect(() => {
-    refreshMissingList();
+    let cancelled = false;
+    (async () => {
+      const { data, error } = await supabase.from("shop").select("dept").not("dept", "is", null);
+      if (error) { console.error(error); return; }
+      if (cancelled) return;
+      const unique = Array.from(new Set((data ?? []).map((r: any) => norm(r.dept)).filter(Boolean))).sort();
+      setDeptOptions(unique);
+    })();
+    return () => { cancelled = true; };
   }, []);
 
-  function mapHeaders(headers: string[]) {
-    const idx: Record<"material" | "cost center" | "total quantity" | "posting date" | "document date", number> = {
-      "material": -1,
-      "cost center": -1,
-      "total quantity": -1,
-      "posting date": -1,
-      "document date": -1,
-    };
-    headers.forEach((h, i) => {
-      const n = normalizeHeader(h);
-      if (n === "material") idx["material"] = i;
-      else if (n === "cost center") idx["cost center"] = i;
-      else if (n === "total quantity") idx["total quantity"] = i;
-      else if (n === "posting date") idx["posting date"] = i;
-      else if (n === "document date") idx["document date"] = i;
-    });
-    return idx;
-  }
+  // master map (no_mat -> MasterRow), and shop map (dept -> loc)
+  const [masterMap, setMasterMap] = useState<Record<string, MasterRow>>({});
+  const [shopMap, setShopMap] = useState<Record<string, number>>({});
+  useEffect(() => {
+    let cancel = false;
+    (async () => {
+      const [{ data: m }, { data: s }] = await Promise.all([
+        supabase.from("master").select("no_mat, price, quantity, category"),
+        supabase.from("shop").select("dept, loc"),
+      ]);
+      if (cancel) return;
 
-  // Fetch shop.code -> shop.dept map (exact codes)
-  async function fetchDeptMap(codes: string[]) {
-    if (!codes.length) return {};
-    const unique = Array.from(new Set(codes.filter(Boolean)));
-    const { data, error } = await supabase.from("shop").select("code, dept").in("code", unique);
-    if (error) throw error;
-    const map: Record<string, string> = {};
-    (data ?? []).forEach((r: any) => {
-      if (r?.code) map[String(r.code).trim()] = r?.dept ? String(r.dept).trim() : DEFAULT_DEPT;
-    });
-    return map;
-  }
-
-  async function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
-    const f = e.target.files?.[0] ?? null;
-    setFile(f);
-    setPreview([]);
-    setMissing([]);
-    if (!f) return;
-
-    if (!isAllowedExcel(f)) {
-      toast.error("Invalid file. Only .xlsx up to 8MB is allowed.");
-      return;
-    }
-
-    try {
-      const { headers, rows } = await parseExcel(f);
-      if (headers.length === 0) throw new Error("No header row found");
-      const idx = mapHeaders(headers);
-
-      const required = ["material", "cost center", "total quantity", "posting date", "document date"] as const;
-      const missingHdr = required.filter((k) => idx[k] === -1);
-      if (missingHdr.length) throw new Error(`Missing columns: ${missingHdr.join(", ")}`);
-
-      const rawCodes = rows.map((r) => String(r[idx["cost center"]] ?? "").trim()).filter(Boolean);
-      const deptMap = await fetchDeptMap(rawCodes);
-
-      const out: ActualRow[] = [];
-      let unmapped = 0;
-
-      for (const r of rows) {
-        if (!r || r.length === 0) continue;
-
-        const material = String(r[idx["material"]] ?? "").trim();
-        if (!material) continue;
-
-        const costCenterRaw = String(r[idx["cost center"]] ?? "").trim();
-        const mappedDept = costCenterRaw
-          ? (deptMap[costCenterRaw] ?? DEFAULT_DEPT)
-          : DEFAULT_DEPT;
-
-        if (costCenterRaw && !(costCenterRaw in deptMap)) unmapped++;
-
-        const qtyRaw = r[idx["total quantity"]];
-        const qtmp = String(qtyRaw ?? "").replace(/,/g, "").trim();
-        const n = qtmp ? Number(qtmp) : null;
-        const quantity = n != null && Number.isNaN(n) ? null : n;
-
-        const posting_date = toYmd(r[idx["posting date"]] as any);
-        const document_date = toYmd(r[idx["document date"]] as any);
-
-        out.push({
-          no_mat: material,
-          dept: mappedDept,
-          quantity,
-          posting_date,
-          document_date,
-        });
-      }
-
-      toast.success(
-        `Loaded ${out.length} rows from ${f.name}` +
-          (unmapped ? ` — ${unmapped} code(s) not in shop` : "")
-      );
-      setPreview(out);
-    } catch (err: any) {
-      console.error(err);
-      toast.error(err?.message ?? "Failed to read Excel");
-    }
-  }
-
-  async function importNow() {
-    if (!preview.length) {
-      toast.error("No prepared rows to import.");
-      return;
-    }
-    setBusy(true);
-    try {
-      // Purge affected months
-      const months = new Set<string>();
-      for (const r of preview) {
-        const base = r.posting_date || r.document_date;
-        if (!base || !/^\d{4}-\d{2}-\d{2}$/.test(base)) continue;
-        months.add(base.slice(0, 7));
-      }
-      for (const ym of months) {
-        const start = `${ym}-01`;
-        const next = nextMonthStart(start);
-        const { error: delErr } = await supabase
-          .from("actual")
-          .delete()
-          .gte("posting_date", start)
-          .lt("posting_date", next);
-        if (delErr) throw new Error(`Purge ${ym} failed: ${delErr.message}`);
-      }
-
-      // Insert in chunks
-      for (const group of chunk(preview, 500)) {
-        const { error } = await supabase.from("actual").insert(group);
-        if (error) throw new Error(`Insert failed: ${error.message}`);
-      }
-
-      await refreshMissingList();
-      toast.success(`Imported ${preview.length} rows & refreshed missing list`);
-    } catch (err: any) {
-      console.error(err);
-      toast.error(err?.message ?? "Import failed");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function addToMaster(payload: MasterRow) {
-    try {
-      const now = new Date().toISOString();
-      const { error } = await supabase.from("master").insert({
-        no_mat: payload.no_mat,
-        mat_name: payload.mat_name,
-        category: payload.category,
-        qty: payload.qty,
-        Price: payload.Price,
-        UoM: payload.UoM,
-        created_at: now,
-        updated_at: now,
+      const mm: Record<string, MasterRow> = {};
+      (m ?? []).forEach((r: any) => {
+        const k = keyNM(r.no_mat);
+        if (!k) return;
+        mm[k] = {
+          no_mat: k,
+          price: safeNumber(r.price),
+          quantity: Math.max(1, safeNumber(r.quantity, 1)),
+          category: r.category ?? null,
+        };
       });
-      if (error) throw new Error(error.message);
-      setMissing((prev) => prev.filter((m) => m !== payload.no_mat));
-      toast.success(`Added ${payload.no_mat} to master`);
-    } catch (e: any) {
-      toast.error(e?.message ?? "Insert failed");
+      setMasterMap(mm);
+
+      const sm: Record<string, number> = {};
+      (s ?? []).forEach((r: any) => {
+        const dept = norm(r.dept);
+        if (!dept) return;
+        sm[dept] = safeNumber(r.loc, 1);
+      });
+      setShopMap(sm);
+    })();
+    return () => { cancel = true; };
+  }, []);
+
+  // calendars for selected month
+  const [cal1, setCal1] = useState<Record<string, number>>({});
+  const [cal2, setCal2] = useState<Record<string, number>>({});
+  const [cal1Total, setCal1Total] = useState(0);
+  const [cal2Total, setCal2Total] = useState(0);
+  useEffect(() => {
+    let cancel = false;
+    (async () => {
+      const { start, end } = monthRange(filters.year, filters.month);
+      const startStr = fmtDate(start), endStr = fmtDate(end);
+      const [{ data: c1 }, { data: c2 }] = await Promise.all([
+        supabase.from("calender1").select("date, working_time, over_time").gte("date", startStr).lte("date", endStr),
+        supabase.from("calender2").select("date, working_time, over_time").gte("date", startStr).lte("date", endStr),
+      ]);
+      if (cancel) return;
+
+      const map1: Record<string, number> = {}; let tot1 = 0;
+      (c1 ?? []).forEach((r: any) => {
+        const d = normalizeDateString(r.date);
+        const w = safeNumber(r.working_time) + safeNumber(r.over_time);
+        if (d) { map1[d] = w; tot1 += w; }
+      });
+
+      const map2: Record<string, number> = {}; let tot2 = 0;
+      (c2 ?? []).forEach((r: any) => {
+        const d = normalizeDateString(r.date);
+        const w = safeNumber(r.working_time) + safeNumber(r.over_time);
+        if (d) { map2[d] = w; tot2 += w; }
+      });
+
+      // fallback to uniform monthly spread if totals are zero
+      const monthDates = listMonthDates(filters.year, filters.month);
+      if (tot1 === 0) { monthDates.forEach(d => { map1[d] = 1; }); tot1 = monthDates.length; }
+      if (tot2 === 0) { monthDates.forEach(d => { map2[d] = 1; }); tot2 = monthDates.length; }
+
+      setCal1(map1); setCal1Total(tot1);
+      setCal2(map2); setCal2Total(tot2);
+    })();
+    return () => { cancel = true; };
+  }, [filters.year, filters.month]);
+
+  // load actual + forecast (forecast filtered by month)
+  const [actualRows, setActualRows] = useState<ActualRow[]>([]);
+  const [forecastRows, setForecastRows] = useState<ForecastRow[]>([]);
+  useEffect(() => {
+    let cancel = false;
+    (async () => {
+      const { start, end } = monthRange(filters.year, filters.month);
+      const startStr = fmtDate(start), endStr = fmtDate(end);
+
+      const ym = ymOf(filters.year, filters.month);
+
+      const qa = supabase.from("actual")
+        .select("no_mat, posting_date, quantity, dept")
+        .gte("posting_date", startStr).lte("posting_date", endStr);
+
+      const qf = supabase.from("forecast")
+        .select("no_mat, shop, usage, month, month_label")
+        .eq("month", ym);
+
+      const [{ data: a, error: ea }, { data: f, error: ef }] = await Promise.all([qa, qf]);
+      if (ea) console.error(ea);
+      if (ef) console.error(ef);
+      if (cancel) return;
+
+      setActualRows((a ?? []).map((r: any) => {
+        const d = normalizeDateString(r.posting_date);
+        return {
+          no_mat: keyNM(r.no_mat),
+          posting_date: d ?? "",
+          quantity: safeNumber(r.quantity),
+          dept: norm(r.dept) || null,
+        };
+      }).filter(r => !!r.posting_date));
+
+      setForecastRows((f ?? []).map((r: any) => ({
+        no_mat: keyNM(r.no_mat),
+        shop: norm(r.shop) || null,
+        usage: safeNumber(r.usage),
+        month: r.month ?? null,
+        month_label: r.month_label ?? null,
+      })));
+    })();
+    return () => { cancel = true; };
+  }, [filters.year, filters.month]);
+
+  /* =========================
+     Filters & joins
+  ========================= */
+  const deptSet = useMemo(() => new Set(deptOptions.map(norm)), [deptOptions]);
+
+  const isDeptAllowed = (rowDept: string | null, rowShop: string | null) => {
+    if (filters.deptMode === "all") return true;
+    if (filters.deptMode === "list") {
+      const target = norm(filters.deptSelected);
+      return norm(rowDept) === target || norm(rowShop) === target;
     }
-  }
+    // unassigned
+    const v = norm(rowDept ?? rowShop);
+    return !!v && !deptSet.has(v);
+  };
 
-  async function refreshMissingList() {
-    try {
-      const { data: actualData, error: err1 } = await supabase.from("actual").select("no_mat");
-      if (err1) throw err1;
-      const { data: masterData, error: err2 } = await supabase.from("master").select("no_mat");
-      if (err2) throw err2;
-
-      const masterSet = new Set((masterData ?? []).map((m) => m.no_mat));
-      const missingList = Array.from(new Set((actualData ?? []).map((a) => a.no_mat))).filter(
-        (x) => !masterSet.has(x)
-      );
-
-      setMissing(missingList);
-      toast.success(`Missing list refreshed — ${missingList.length} item(s)`);
-    } catch (e: any) {
-      toast.error(e?.message ?? "Failed to refresh list");
+  const isMaterialAllowed = (no_mat: string) => {
+    const m = masterMap[no_mat];
+    const cat = normLower(m?.category);
+    if (filters.material === "all") return true;
+    if (filters.material === "Unassigned") {
+      return !(cat === "direct material" || cat === "indirect material");
     }
-  }
+    return cat === normLower(filters.material);
+  };
 
-  /* ---------- JSX ---------- */
+  const vpu = (no_mat: string) => {
+    const m = masterMap[no_mat];
+    if (!m) return 0; // set to 1 for debugging if you want to see items missing in master
+    return safeNumber(m.price) / Math.max(1, safeNumber(m.quantity, 1));
+  };
+
+  /* =========================
+     DEBUG TABLES (filtered rows)
+  ========================= */
+  const filteredActual = useMemo(() => {
+    return actualRows
+      .filter(r => isMaterialAllowed(r.no_mat) && isDeptAllowed(r.dept, null))
+      .map(r => ({
+        posting_date: r.posting_date,
+        no_mat: r.no_mat,
+        dept: r.dept ?? "",
+        quantity: r.quantity,
+        value: Number((r.quantity * vpu(r.no_mat)).toFixed(2)),
+      }));
+  }, [actualRows, isDeptAllowed, isMaterialAllowed]);
+
+  const filteredForecast = useMemo(() => {
+    return forecastRows
+      .filter(r => isMaterialAllowed(r.no_mat) && isDeptAllowed(null, r.shop))
+      .map(r => ({
+        shop: r.shop ?? "",
+        loc: shopMap[norm(r.shop)] ?? 1,
+        no_mat: r.no_mat,
+        usage: r.usage,
+        value: Number((r.usage * vpu(r.no_mat)).toFixed(2)),
+      }));
+  }, [forecastRows, isDeptAllowed, isMaterialAllowed, shopMap]);
+
+  // pagination
+  const [pageA, setPageA] = useState(1);
+  const [pageF, setPageF] = useState(1);
+  const [pageSizeA, setPageSizeA] = useState(20);
+  const [pageSizeF, setPageSizeF] = useState(20);
+
+  useEffect(() => { setPageA(1); setPageF(1); }, [filters, filteredActual.length, filteredForecast.length]);
+
+  const pagesA = Math.max(1, Math.ceil(filteredActual.length / pageSizeA));
+  const pagesF = Math.max(1, Math.ceil(filteredForecast.length / pageSizeF));
+
+  const pagedActual = useMemo(() => {
+    const start = (pageA - 1) * pageSizeA;
+    return filteredActual.slice(start, start + pageSizeA);
+  }, [filteredActual, pageA, pageSizeA]);
+
+  const pagedForecast = useMemo(() => {
+    const start = (pageF - 1) * pageSizeF;
+    return filteredForecast.slice(start, start + pageSizeF);
+  }, [filteredForecast, pageF, pageSizeF]);
+
+  /* =========================
+     Graph data
+  ========================= */
+  const dates = useMemo(() => listMonthDates(filters.year, filters.month), [filters.year, filters.month]);
+
+  const graphData = useMemo(() => {
+    const actualByDate: Record<string, number> = {};
+    const forecastByDate: Record<string, number> = {};
+    for (const d of dates) { actualByDate[d] = 0; forecastByDate[d] = 0; }
+
+    // Actual: sum daily values
+    filteredActual.forEach(r => {
+      if (r.posting_date in actualByDate) {
+        actualByDate[r.posting_date] += r.value;
+      }
+    });
+
+    // Forecast: distribute monthly value by calendar weights
+    filteredForecast.forEach(r => {
+      const loc = r.loc === 2 ? 2 : 1;
+      const cal   = loc === 2 ? cal2 : cal1;
+      const total = loc === 2 ? cal2Total : cal1Total;
+      const denom = total > 0 ? total : 1;
+      dates.forEach(d => {
+        const weight = cal[d] ?? 0;
+        forecastByDate[d] += r.value * (weight / denom);
+      });
+    });
+
+    // rows + cumulative
+    let cumA = 0, cumF = 0;
+    return dates.map(d => {
+      const a = actualByDate[d] || 0;
+      const f = forecastByDate[d] || 0;
+      cumA += a; cumF += f;
+      return {
+        date: d.slice(8, 10),
+        actual: Number(a.toFixed(2)),
+        forecast: Number(f.toFixed(2)),
+        cumActual: Number(cumA.toFixed(2)),
+        cumForecast: Number(cumF.toFixed(2)),
+      };
+    });
+  }, [dates, filteredActual, filteredForecast, cal1, cal2, cal1Total, cal2Total]);
+
+  /* =========================
+     UI
+  ========================= */
   return (
     <div className="min-h-dvh grid grid-cols-[260px_1fr]">
       <aside className="border-r bg-white dark:bg-slate-900 sticky top-0 h-dvh overflow-y-auto">
@@ -318,380 +391,352 @@ export default function Actual() {
 
       <main className="min-w-0 overflow-x-hidden">
         <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 dark:from-slate-950 dark:to-slate-900 p-8">
-          <div className="max-w-7xl mx-auto space-y-6">
-            <Card>
-              <CardHeader className="flex items-center justify-between">
-                <CardTitle>Actual — Upload & Import</CardTitle>
-                <div className="flex gap-2">
-                  <Button variant="outline" size="sm" onClick={() => setShopOpen(true)}>
-                    Manage Shops
-                  </Button>
-                </div>
+          <div className="container mx-auto p-6 space-y-6">
+            {/* Filters */}
+            <Card className="border-dashed">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-base">Filters</CardTitle>
               </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="flex flex-wrap items-end gap-4">
-                  <div className="space-y-2">
-                    <Label htmlFor="file">Excel file (.xlsx only)</Label>
-                    <Input
-                      key={fileKey}
-                      id="file"
-                      type="file"
-                      accept=".xlsx"
-                      onChange={handleFile}
-                      className="w-80"
-                    />
-                    {file && (
-                      <div className="text-xs text-slate-500 mt-1">
-                        Selected: <span className="font-medium">{file.name}</span>
-                      </div>
-                    )}
-                  </div>
-                  <Button
-                    variant="outline"
-                    onClick={() => {
-                      setFile(null);
-                      setPreview([]);
-                      setMissing([]);
-                      setFileKey((k) => k + 1);
-                    }}
-                  >
-                    Clear
-                  </Button>
-                  <Button onClick={importNow} disabled={!preview.length || busy}>
-                    {busy ? "Importing…" : "Purge month(s) & Import"}
-                  </Button>
-                </div>
-
-                {preview.length > 0 && (
-                  <div className="space-y-2">
-                    <div className="text-sm text-slate-600 dark:text-slate-300">
-                      Prepared <b>{preview.length}</b> rows. Showing first 20:
-                    </div>
-                    <div className="border rounded-lg overflow-auto max-h-[50vh]">
-                      <table className="w-full text-sm">
-                        <thead className="sticky top-0 bg-slate-50 dark:bg-slate-900">
-                          <tr>
-                            <th className="px-3 py-2 text-left">no_mat</th>
-                            <th className="px-3 py-2 text-left">dept</th>
-                            <th className="px-3 py-2 text-right">quantity</th>
-                            <th className="px-3 py-2 text-left">posting_date</th>
-                            <th className="px-3 py-2 text-left">document_date</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {preview.slice(0, 20).map((r, i) => (
-                            <tr key={i} className="border-t">
-                              <td className="px-3 py-2 font-mono">{r.no_mat}</td>
-                              <td className="px-3 py-2">{r.dept}</td>
-                              <td className="px-3 py-2 text-right tabular-nums">{r.quantity ?? ""}</td>
-                              <td className="px-3 py-2 tabular-nums">{r.posting_date}</td>
-                              <td className="px-3 py-2 tabular-nums">{r.document_date}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                )}
+              <CardContent>
+                <FiltersUI filters={filters} setFilters={setFilters} deptOptions={deptOptions} />
               </CardContent>
             </Card>
 
-            <Card>
-              <CardHeader className="flex items-center justify-between">
-                <CardTitle>Materials missing in master</CardTitle>
-                <Button size="sm" variant="outline" onClick={refreshMissingList}>
-                  Refresh Missing List
+            {/* Debug toggle */}
+            <div className="flex items-center justify-between">
+              <div className="text-sm text-muted-foreground">Debugging: filtered data preview (forecast vs actual)</div>
+              <div className="flex items-center gap-2">
+                <Label className="mr-2">Show tables</Label>
+                <Button variant="outline" size="sm" onClick={() => setShowDebug(s => !s)} className="gap-2">
+                  {showDebug ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  {showDebug ? "Hide" : "Show"}
                 </Button>
-              </CardHeader>
-              <CardContent>
-                {missing.length === 0 ? (
-                  <div className="text-sm text-slate-500">No missing items. Import or refresh data first.</div>
-                ) : (
-                  <div className="border rounded-lg overflow-auto max-h-[60vh]">
-                    <table className="w-full text-sm">
-                      <thead className="sticky top-0 bg-slate-50 dark:bg-slate-900">
-                        <tr>
-                          <th className="px-3 py-2 text-left w-40">no_mat</th>
-                          <th className="px-3 py-2 text-left w-64">mat_name</th>
-                          <th className="px-3 py-2 text-left w-48">category</th>
-                          <th className="px-3 py-2 text-right w-20">qty</th>
-                          <th className="px-3 py-2 text-right w-24">Price</th>
-                          <th className="px-3 py-2 text-left w-20">UoM</th>
-                          <th className="px-3 py-2 text-center w-32">Action</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {missing.map((no_mat) => (
-                          <MissingRow key={no_mat} no_mat={no_mat} onAdd={addToMaster} />
-                        ))}
-                      </tbody>
-                    </table>
+              </div>
+            </div>
+
+            {/* Debug tables */}
+            {showDebug && (
+              <Card>
+                <CardHeader><CardTitle>Filtered Material — Debug</CardTitle></CardHeader>
+                <CardContent>
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    {/* Forecast table */}
+                    <DebugTable
+                      title={`Forecast (${filteredForecast.length})`}
+                      rows={pagedForecast}
+                      totalRows={filteredForecast.length}
+                      page={pageF}
+                      pages={pagesF}
+                      pageSize={pageSizeF}
+                      setPage={setPageF}
+                      setPageSize={setPageSizeF}
+                      columns={[
+                        { key: "shop", label: "Shop" },
+                        { key: "loc",  label: "Dept Loc" },
+                        { key: "no_mat", label: "No Mat", mono: true },
+                        { key: "usage", label: "Usage", align: "right" },
+                        { key: "value", label: "Value", align: "right", format: (v: any) => Number(v).toLocaleString() },
+                      ]}
+                    />
+
+                    {/* Actual table */}
+                    <DebugTable
+                      title={`Actual (${filteredActual.length})`}
+                      rows={pagedActual}
+                      totalRows={filteredActual.length}
+                      page={pageA}
+                      pages={pagesA}
+                      pageSize={pageSizeA}
+                      setPage={setPageA}
+                      setPageSize={setPageSizeA}
+                      columns={[
+                        { key: "posting_date", label: "Date", mono: true },
+                        { key: "dept", label: "Dept" },
+                        { key: "no_mat", label: "No Mat", mono: true },
+                        { key: "quantity", label: "Qty", align: "right" },
+                        { key: "value", label: "Value", align: "right", format: (v: any) => Number(v).toLocaleString() },
+                      ]}
+                    />
                   </div>
-                )}
+                </CardContent>
+              </Card>
+            )}
+
+            {/* Graphs */}
+            <Card>
+              <CardHeader className="flex items-center justify-between gap-4">
+                <CardTitle>Graphs</CardTitle>
+                <div className="flex items-center gap-3">
+                  <Label>Graph</Label>
+                  <Select value={graphMode} onValueChange={(v) => setGraphMode(v as GraphMode)}>
+                    <SelectTrigger className="w-56"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="Combination">Combination</SelectItem>
+                      <SelectItem value="Daily Control">Daily Control</SelectItem>
+                      <SelectItem value="Accumulative Control">Accumulative Control</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <GraphBlock mode={graphMode} data={graphData} />
+                <div className="text-xs text-muted-foreground">
+                  days: {graphData.length} • sumA: {graphData.reduce((s,r)=>s+r.actual,0).toFixed(2)} • sumF: {graphData.reduce((s,r)=>s+r.forecast,0).toFixed(2)}
+                </div>
               </CardContent>
             </Card>
           </div>
         </div>
       </main>
-
-      {/* Shop CRUD Dialog */}
-      <ShopManagerDialog open={shopOpen} onOpenChange={setShopOpen} />
     </div>
   );
 }
 
-/* ---------- Shop Manager Dialog (CRUD shop: code, dept, loc) ---------- */
-function ShopManagerDialog({
-  open,
-  onOpenChange,
+/* =========================
+   Filters UI
+========================= */
+function FiltersUI({
+  filters, setFilters, deptOptions,
 }: {
-  open: boolean;
-  onOpenChange: (v: boolean) => void;
+  filters: FilterState;
+  setFilters: React.Dispatch<React.SetStateAction<FilterState>>;
+  deptOptions: string[];
 }) {
-  const [rows, setRows] = useState<ShopRow[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [adding, setAdding] = useState(false);
-  const [newCode, setNewCode] = useState("");
-  const [newDept, setNewDept] = useState("");
-  const [newLoc, setNewLoc] = useState("");
-
-  useEffect(() => {
-    if (open) void load();
-  }, [open]);
-
-  async function load() {
-    setLoading(true);
-    try {
-      const { data, error } = await supabase.from("shop").select("code, dept, loc").order("code", { ascending: true });
-      if (error) throw error;
-      setRows((data ?? []).map((r) => ({ code: r.code, dept: r.dept ?? "", loc: r.loc ?? "" })));
-    } catch (e: any) {
-      toast.error(e?.message ?? "Failed to load shops");
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function addShop() {
-    if (!newCode.trim() || !newDept.trim()) {
-      toast.error("Code and Dept are required");
-      return;
-    }
-    setAdding(true);
-    try {
-      const payload = { code: newCode.trim(), dept: newDept.trim(), loc: newLoc.trim() || null };
-      const { error } = await supabase.from("shop").insert(payload);
-      if (error) throw error;
-      setNewCode(""); setNewDept(""); setNewLoc("");
-      toast.success("Shop added");
-      await load();
-    } catch (e: any) {
-      toast.error(e?.message ?? "Add failed");
-    } finally {
-      setAdding(false);
-    }
-  }
-
-  async function saveRow(code: string, dept: string, loc: string | null) {
-    try {
-      const { error } = await supabase.from("shop").update({ dept, loc }).eq("code", code);
-      if (error) throw error;
-      toast.success(`Saved ${code}`);
-      await load();
-    } catch (e: any) {
-      toast.error(e?.message ?? "Save failed");
-    }
-  }
-
-  async function deleteRow(code: string) {
-    try {
-      const { error } = await supabase.from("shop").delete().eq("code", code);
-      if (error) throw error;
-      toast.success(`Deleted ${code}`);
-      setRows((prev) => prev.filter((r) => r.code !== code));
-    } catch (e: any) {
-      toast.error(e?.message ?? "Delete failed");
-    }
-  }
+  const now = new Date();
+  const [deptOpen, setDeptOpen] = useState(false);
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-3xl">
-        <DialogHeader>
-          <DialogTitle>Manage Shops</DialogTitle>
-          <DialogDescription>View, add, edit, and delete shop records (code, dept, loc).</DialogDescription>
-        </DialogHeader>
-
-        {/* Add form */}
-        <div className="flex gap-2 items-end">
-          <div className="space-y-1">
-            <Label>Code *</Label>
-            <Input value={newCode} onChange={(e) => setNewCode(e.target.value)} className="w-36" />
-          </div>
-          <div className="space-y-1">
-            <Label>Dept *</Label>
-            <Input value={newDept} onChange={(e) => setNewDept(e.target.value)} className="w-48" />
-          </div>
-          <div className="space-y-1">
-            <Label>Loc</Label>
-            <Input value={newLoc} onChange={(e) => setNewLoc(e.target.value)} className="w-36" />
-          </div>
-          <Button onClick={addShop} disabled={adding}>{adding ? "Adding…" : "Add"}</Button>
-          <Button variant="outline" onClick={load} disabled={loading}>{loading ? "Loading…" : "Refresh"}</Button>
+    <div className="grid gap-4 md:grid-cols-12">
+      {/* Month selector */}
+      <div className="md:col-span-4 space-y-2">
+        <Label>Month</Label>
+        <div className="flex gap-2">
+          <Select value={String(filters.month)} onValueChange={(v) => setFilters(f => ({ ...f, month: Number(v) }))}>
+            <SelectTrigger className="w-44"><SelectValue placeholder="Month" /></SelectTrigger>
+            <SelectContent>
+              {MONTHS.map(m => (<SelectItem key={m.value} value={String(m.value)}>{m.label}</SelectItem>))}
+            </SelectContent>
+          </Select>
+          <Select value={String(filters.year)} onValueChange={(v) => setFilters(f => ({ ...f, year: Number(v) }))}>
+            <SelectTrigger className="w-28"><SelectValue placeholder="Year" /></SelectTrigger>
+            <SelectContent>
+              {YEARS.map(y => (<SelectItem key={y} value={String(y)}>{y}</SelectItem>))}
+            </SelectContent>
+          </Select>
+          <Button variant="outline" className="gap-2" onClick={() => setFilters(f => ({ ...f, month: now.getMonth() + 1, year: now.getFullYear() }))}>
+            <CalendarDays className="h-4 w-4" /> This month
+          </Button>
         </div>
+        <p className="text-xs text-muted-foreground">Applies to both <span className="font-mono">forecast</span> and <span className="font-mono">actual</span>.</p>
+      </div>
 
-        {/* List / edit table */}
-        <div className="border rounded-lg overflow-auto max-h-[60vh]">
-          <table className="w-full text-sm">
-            <thead className="sticky top-0 bg-slate-50 dark:bg-slate-900">
-              <tr>
-                <th className="px-3 py-2 text-left w-32">code</th>
-                <th className="px-3 py-2 text-left w-64">dept</th>
-                <th className="px-3 py-2 text-left w-40">loc</th>
-                <th className="px-3 py-2 text-center w-40">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.length === 0 ? (
-                <tr>
-                  <td className="px-3 py-4 text-slate-500" colSpan={4}>
-                    {loading ? "Loading…" : "No rows"}
-                  </td>
-                </tr>
-              ) : (
-                rows.map((r) => <EditableShopRow key={r.code} row={r} onSave={saveRow} onDelete={deleteRow} />)
-              )}
-            </tbody>
-          </table>
+      {/* Department mode */}
+      <div className="md:col-span-4 space-y-2">
+        <Label>Department</Label>
+        <div className="flex gap-2">
+          <Select value={filters.deptMode} onValueChange={(v: DeptMode) => setFilters(f => ({ ...f, deptMode: v }))}>
+            <SelectTrigger className="w-40"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All</SelectItem>
+              <SelectItem value="list">List</SelectItem>
+              <SelectItem value="unassigned">Unassigned</SelectItem>
+            </SelectContent>
+          </Select>
+
+          {filters.deptMode === "list" && (
+            <Popover open={deptOpen} onOpenChange={setDeptOpen}>
+              <PopoverTrigger asChild>
+                <Button
+                  variant="outline"
+                  role="combobox"
+                  className={cn("w-56 justify-between", !filters.deptSelected && "text-muted-foreground")}
+                >
+                  {filters.deptSelected || "Select department"}
+                  <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent className="w-56 p-0">
+                <Command>
+                  <CommandInput placeholder="Search dept..." />
+                  <CommandEmpty>No department found.</CommandEmpty>
+                  <CommandGroup>
+                    {deptOptions.map((dept) => (
+                      <CommandItem
+                        key={dept}
+                        value={dept}
+                        onSelect={(v) => { setFilters(f => ({ ...f, deptSelected: v })); setDeptOpen(false); }}
+                      >
+                        <Check className={cn("mr-2 h-4 w-4", dept === filters.deptSelected ? "opacity-100" : "opacity-0")} />
+                        {dept}
+                      </CommandItem>
+                    ))}
+                  </CommandGroup>
+                </Command>
+              </PopoverContent>
+            </Popover>
+          )}
         </div>
-      </DialogContent>
-    </Dialog>
+        <p className="text-xs text-muted-foreground">
+          Source list from <span className="font-mono">shop.dept</span>; “Unassigned” = values in
+          <span className="font-mono"> actual.dept</span>/<span className="font-mono">forecast.shop</span> not in
+          <span className="font-mono"> shop.dept</span>.
+        </p>
+      </div>
+
+      {/* Material */}
+      <div className="md:col-span-4 space-y-2">
+        <Label>Material</Label>
+        <Select value={filters.material} onValueChange={(v: MaterialOpt) => setFilters(f => ({ ...f, material: v }))}>
+          <SelectTrigger className="w-60"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All</SelectItem>
+            <SelectItem value="Direct Material">Direct Material</SelectItem>
+            <SelectItem value="Indirect Material">Indirect Material</SelectItem>
+            <SelectItem value="Unassigned">Unassigned</SelectItem>
+          </SelectContent>
+        </Select>
+        <p className="text-xs text-muted-foreground">Based on <span className="font-mono">master.category</span>.</p>
+      </div>
+    </div>
   );
 }
 
-function EditableShopRow({
-  row,
-  onSave,
-  onDelete,
+/* =========================
+   Reusable DebugTable
+========================= */
+function DebugTable({
+  title, rows, totalRows, page, pages, pageSize, setPage, setPageSize,
+  columns,
 }: {
-  row: ShopRow;
-  onSave: (code: string, dept: string, loc: string | null) => Promise<void>;
-  onDelete: (code: string) => Promise<void>;
+  title: string;
+  rows: any[];
+  totalRows: number;
+  page: number;
+  pages: number;
+  pageSize: number;
+  setPage: (n: number) => void;
+  setPageSize: (n: number) => void;
+  columns: { key: string; label: string; mono?: boolean; align?: "right"; format?: (v: any) => string }[];
 }) {
-  const [dept, setDept] = useState(row.dept);
-  const [loc, setLoc] = useState(row.loc ?? "");
-  const [saving, setSaving] = useState(false);
-  const [deleting, setDeleting] = useState(false);
-
   return (
-    <tr className="border-t">
-      <td className="px-3 py-2 font-mono">{row.code}</td>
-      <td className="px-3 py-2">
-        <Input value={dept} onChange={(e) => setDept(e.target.value)} />
-      </td>
-      <td className="px-3 py-2">
-        <Input value={loc} onChange={(e) => setLoc(e.target.value)} />
-      </td>
-      <td className="px-3 py-2 text-center">
-        <div className="flex justify-center gap-2">
-          <Button
-            size="sm"
-            onClick={async () => {
-              setSaving(true);
-              try { await onSave(row.code, dept.trim(), loc.trim() || null); }
-              finally { setSaving(false); }
-            }}
-            disabled={saving}
-          >
-            {saving ? "Saving…" : "Save"}
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => { setDept(row.dept); setLoc(row.loc ?? ""); }}
-          >
-            Reset
-          </Button>
-          <Button
-            size="sm"
-            variant="destructive"
-            onClick={async () => {
-              if (!confirm(`Delete shop "${row.code}"?`)) return;
-              setDeleting(true);
-              try { await onDelete(row.code); }
-              finally { setDeleting(false); }
-            }}
-            disabled={deleting}
-          >
-            {deleting ? "Deleting…" : "Delete"}
-          </Button>
+    <div className="min-w-0">
+      <div className="flex items-center justify-between mb-2">
+        <div className="text-sm font-medium">{title}</div>
+        <div className="flex items-center gap-2">
+          <Label className="text-xs">Rows per page</Label>
+          <Select value={String(pageSize)} onValueChange={(v) => { setPageSize(Number(v)); setPage(1); }}>
+            <SelectTrigger className="h-8 w-24"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="10">10</SelectItem>
+              <SelectItem value="20">20</SelectItem>
+              <SelectItem value="50">50</SelectItem>
+            </SelectContent>
+          </Select>
+          <div className="text-xs text-muted-foreground">Page {page} / {pages}</div>
+          <div className="flex gap-2">
+            <Button variant="outline" size="sm" onClick={() => setPage(Math.max(1, page - 1))}>Prev</Button>
+            <Button variant="outline" size="sm" onClick={() => setPage(Math.min(pages, page + 1))}>Next</Button>
+          </div>
         </div>
-      </td>
-    </tr>
+      </div>
+      <div className="rounded-lg border overflow-auto max-h-[360px]">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              {columns.map((c) => (
+                <TableHead key={c.key} className={c.align === "right" ? "text-right" : ""}>{c.label}</TableHead>
+              ))}
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {rows.map((r, idx) => (
+              <TableRow key={idx}>
+                {columns.map((c) => {
+                  const val = r[c.key];
+                  const text = c.format ? c.format(val) : String(val ?? "");
+                  return (
+                    <TableCell
+                      key={c.key}
+                      className={[
+                        c.align === "right" ? "text-right" : "",
+                        c.mono ? "font-mono" : "",
+                      ].join(" ")}
+                    >
+                      {text}
+                    </TableCell>
+                  );
+                })}
+              </TableRow>
+            ))}
+            {rows.length === 0 && (
+              <TableRow>
+                <TableCell colSpan={columns.length} className="text-center text-sm text-muted-foreground">No data</TableCell>
+              </TableRow>
+            )}
+          </TableBody>
+        </Table>
+      </div>
+    </div>
   );
 }
 
-/* ---------- MissingRow Component (unchanged) ---------- */
-function MissingRow({
-  no_mat,
-  onAdd,
-}: {
-  no_mat: string;
-  onAdd: (payload: MasterRow) => Promise<void>;
-}) {
-  const [mat_name, setMatName] = useState("");
-  const [category, setCategory] = useState("");
-  const [qty, setQty] = useState<number | null>(null);
-  const [Price, setPrice] = useState<number | null>(null);
-  const [UoM, setUoM] = useState("");
-  const [busy, setBusy] = useState(false);
+/* =========================
+   Graph Block
+========================= */
+function GraphBlock({ mode, data }: { mode: GraphMode; data: any[] }) {
+  if (mode === "Daily Control") {
+    return (
+      <div className="h-[420px]">
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart data={data}>
+            <CartesianGrid strokeDasharray="3 3" />
+            <XAxis dataKey="date" />
+            <YAxis />
+            <Tooltip />
+            <Legend />
+            <Bar dataKey="actual" name="Actual" />
+            <Bar dataKey="forecast" name="Forecast" />
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+    );
+  }
 
+  if (mode === "Accumulative Control") {
+    return (
+      <div className="h-[420px]">
+        <ResponsiveContainer width="100%" height="100%">
+          <LineChart data={data}>
+            <CartesianGrid strokeDasharray="3 3" />
+            <XAxis dataKey="date" />
+            <YAxis />
+            <Tooltip />
+            <Legend />
+            <Line type="monotone" dataKey="cumActual" name="Cum Actual" />
+            <Line type="monotone" dataKey="cumForecast" name="Cum Forecast" />
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+    );
+  }
+
+  // Combination
   return (
-    <tr className="border-t">
-      <td className="px-3 py-2 font-mono">{no_mat}</td>
-      <td className="px-3 py-2">
-        <Input value={mat_name} onChange={(e) => setMatName(e.target.value)} placeholder="mat_name" />
-      </td>
-      <td className="px-3 py-2">
-        <Input value={category} onChange={(e) => setCategory(e.target.value)} placeholder="category" />
-      </td>
-      <td className="px-3 py-2">
-        <Input
-          type="number"
-          value={qty ?? ""}
-          onChange={(e) => setQty(e.target.value ? Number(e.target.value) : null)}
-          placeholder="qty"
-          className="w-24 text-right"
-        />
-      </td>
-      <td className="px-3 py-2">
-        <Input
-          type="number"
-          value={Price ?? ""}
-          onChange={(e) => setPrice(e.target.value ? Number(e.target.value) : null)}
-          placeholder="Price"
-          className="w-28 text-right"
-        />
-      </td>
-      <td className="px-3 py-2">
-        <Input value={UoM} onChange={(e) => setUoM(e.target.value)} placeholder="UoM" className="w-24" />
-      </td>
-      <td className="px-3 py-2 text-center">
-        <Button
-          size="sm"
-          disabled={busy}
-          onClick={async () => {
-            setBusy(true);
-            try {
-              await onAdd({ no_mat, mat_name, category, qty, Price, UoM });
-            } finally {
-              setBusy(false);
-            }
-          }}
-        >
-          {busy ? "Adding…" : "Add"}
-        </Button>
-      </td>
-    </tr>
+    <div className="h-[460px]">
+      <ResponsiveContainer width="100%" height="100%">
+        <BarChart data={data}>
+          <CartesianGrid strokeDasharray="3 3" />
+          <XAxis dataKey="date" />
+          <YAxis yAxisId="left" />
+          <YAxis yAxisId="right" orientation="right" />
+          <Tooltip />
+          <Legend />
+          <Bar yAxisId="left" dataKey="actual" name="Actual (Daily)" />
+          <Bar yAxisId="left" dataKey="forecast" name="Forecast (Daily)" />
+          <Line yAxisId="right" type="monotone" dataKey="cumActual" name="Cum Actual" />
+          <Line yAxisId="right" type="monotone" dataKey="cumForecast" name="Cum Forecast" />
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
   );
 }
