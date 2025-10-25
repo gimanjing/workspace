@@ -21,8 +21,10 @@ import {
   ResponsiveContainer,
   BarChart, Bar,
   LineChart, Line,
-  XAxis, YAxis, CartesianGrid, Tooltip, Legend,
+  ComposedChart, Area,    // ⬅️ add Area + ComposedChart
+  XAxis, YAxis, Tooltip, Legend,
 } from "recharts";
+
 
 /* =========================
    Types
@@ -369,37 +371,75 @@ export default function Actual() {
     };
   }, [graphModeDates, cal1, cal2]);
 
-  const graphData = useMemo(() => {
-    const { dates, w1, w2 } = weights;
+ // ⬇️ REPLACE your current graphData useMemo with this one
+const graphData = useMemo(() => {
+  const { dates, w1, w2 } = weights;
 
-    const actualByIdx = new Array(dates.length).fill(0);
-    for (const r of filteredActual) {
-      const idx = dates.indexOf(r.posting_date);
-      if (idx >= 0) actualByIdx[idx] += r.value;
+  // Actual (unchanged): daily value by date
+  const actualByIdx = new Array(dates.length).fill(0);
+  for (const r of filteredActual) {
+    const idx = dates.indexOf(r.posting_date);
+    if (idx >= 0) actualByIdx[idx] += r.value;
+  }
+
+  // Forecast: compute per-day per-material in UNITS, rounded by master.qty, then convert to VALUE
+  const midByIdx    = new Array(dates.length).fill(0); // raw (no rounding)
+  const lowerByIdx  = new Array(dates.length).fill(0); // floor to pack
+  const upperByIdx  = new Array(dates.length).fill(0); // ceil  to pack
+
+  for (const r of filteredForecast) {
+    const arr = r.loc === 2 ? w2 : w1;
+    const pack = Math.max(1, safeNumber(masterMap[r.no_mat]?.quantity, 1)); // master.qty (pack size)
+    const unitPrice = vpu(r.no_mat); // value per ONE unit (price / qty)
+
+    for (let i = 0; i < arr.length; i++) {
+      const dayQty = r.quantity * arr[i]; // daily UNITS (not value)
+      const floorQ = Math.floor(dayQty / pack) * pack;
+      const ceilQ  = Math.ceil(dayQty / pack) * pack;
+
+      midByIdx[i]   += dayQty * unitPrice;
+      lowerByIdx[i] += floorQ * unitPrice;
+      upperByIdx[i] += ceilQ  * unitPrice;
     }
+  }
 
-    const forecastByIdx = new Array(dates.length).fill(0);
-    for (const r of filteredForecast) {
-      const arr = (r.loc === 2) ? w2 : w1;
-      const add = r.value;
-      for (let i = 0; i < arr.length; i++) forecastByIdx[i] += add * arr[i];
-    }
+  // Build rows + cumulative
+  let cumA = 0, cumMid = 0, cumLo = 0, cumUp = 0;
+  return dates.map((iso, i) => {
+    const a  = +actualByIdx[i].toFixed(2);
+    const m  = +midByIdx[i].toFixed(2);
+    const lo = +lowerByIdx[i].toFixed(2);
+    const up = +upperByIdx[i].toFixed(2);
 
-    let cumA = 0, cumF = 0;
-    return dates.map((iso, i) => {
-      const a = +actualByIdx[i].toFixed(2);
-      const f = +forecastByIdx[i].toFixed(2);
-      cumA = +(cumA + a).toFixed(2);
-      cumF = +(cumF + f).toFixed(2);
-      return {
-        date: iso.slice(8, 10),
-        actual: a,
-        forecast: f,
-        cumActual: cumA,
-        cumForecast: cumF,
-      };
-    });
-  }, [weights, filteredActual, filteredForecast]);
+    cumA  = +(cumA  + a ).toFixed(2);
+    cumMid= +(cumMid+ m ).toFixed(2);
+    cumLo = +(cumLo + lo).toFixed(2);
+    cumUp = +(cumUp + up).toFixed(2);
+
+    // bands relative to LOWER so we can stack areas (lower + bandBottom = mid; + bandTop = upper)
+    const bandBottom = +(cumMid - cumLo).toFixed(2);
+    const bandTop    = +(cumUp  - cumMid).toFixed(2);
+
+    return {
+      date: iso.slice(8, 10),
+
+      // daily (keep if you still show daily charts elsewhere)
+      actual: a,
+      forecast: m,
+
+      // cumulative
+      cumActual: cumA,
+      cumForecast: cumMid,
+      cumForecastLower: cumLo,
+      cumForecastUpper: cumUp,
+
+      // bands for shading between the three lines
+      bandBottom, // (cumForecast - cumForecastLower)
+      bandTop,    // (cumForecastUpper - cumForecast)
+    };
+  });
+}, [weights, filteredActual, filteredForecast, masterMap, vpu]);
+
 
   const sumA = useMemo(()=>graphData.reduce((s,r)=>s+r.actual,0),[graphData]);
   const sumF = useMemo(()=>graphData.reduce((s,r)=>s+r.forecast,0),[graphData]);
@@ -812,18 +852,19 @@ function GraphBlock({ mode, data }: { mode: GraphMode; data: any[] }) {
   );
 }
 /* =========================
-   Cumulative Chart (always shown)
+   Cumulative Chart with upper/mid/lower + bands
 ========================= */
 function CumulativeChart({ data }: { data: any[] }) {
   const BLUE  = "hsl(var(--chart-1))"; // Cum Actual
-  const GREEN = "hsl(var(--chart-2))"; // Cum Forecast
+  const GREEN = "hsl(var(--chart-2))"; // Forecast lines & bands
+
   const yTick = (v: number) =>
     new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(v);
 
   const ChartTooltip = ({ active, payload, label }: any) => {
     if (!active || !payload?.length) return null;
     const map: Record<string, number> = {};
-    payload.forEach((p: any) => { map[p.name] = p.value; });
+    payload.forEach((p: any) => (map[p.name] = p.value));
     return (
       <div className="rounded-md border bg-popover p-3 text-popover-foreground shadow-sm">
         <div className="text-xs font-medium">Day {label}</div>
@@ -834,10 +875,24 @@ function CumulativeChart({ data }: { data: any[] }) {
             </span>
           </div>
         )}
-        {"Cum Forecast" in map && (
+        {"Cum Forecast (mid)" in map && (
           <div className="text-xs">
             Cum F: <span className="font-mono">
-              {new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR", maximumFractionDigits: 0 }).format(map["Cum Forecast"])}
+              {new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR", maximumFractionDigits: 0 }).format(map["Cum Forecast (mid)"])}
+            </span>
+          </div>
+        )}
+        {"Cum Forecast (lower)" in map && (
+          <div className="text-xs">
+            Lower: <span className="font-mono">
+              {new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR", maximumFractionDigits: 0 }).format(map["Cum Forecast (lower)"])}
+            </span>
+          </div>
+        )}
+        {"Cum Forecast (upper)" in map && (
+          <div className="text-xs">
+            Upper: <span className="font-mono">
+              {new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR", maximumFractionDigits: 0 }).format(map["Cum Forecast (upper)"])}
             </span>
           </div>
         )}
@@ -848,12 +903,69 @@ function CumulativeChart({ data }: { data: any[] }) {
   return (
     <div className="h-[420px]">
       <ResponsiveContainer width="100%" height="100%">
-        <LineChart data={data}>
-          {/* no grid */}
+        <ComposedChart data={data}>
+          {/* clean axes; no grid */}
           <XAxis dataKey="date" axisLine={false} tickLine={false} />
           <YAxis tickFormatter={yTick} axisLine={false} tickLine={false} />
           <Tooltip content={<ChartTooltip />} />
           <Legend />
+
+          {/* Invisible baseline at lower so stacked areas start from lower */}
+          <Area dataKey="cumForecastLower" stackId="band" stroke="none" fill="transparent" isAnimationActive={false} />
+
+          {/* Band: lower -> mid */}
+          <Area
+            dataKey="bandBottom"
+            stackId="band"
+            name="Band (lower→mid)"
+            stroke="none"
+            fill={GREEN}
+            fillOpacity={0.15}
+            isAnimationActive={false}
+          />
+          {/* Band: mid -> upper */}
+          <Area
+            dataKey="bandTop"
+            stackId="band"
+            name="Band (mid→upper)"
+            stroke="none"
+            fill={GREEN}
+            fillOpacity={0.10}
+            isAnimationActive={false}
+          />
+
+          {/* Lines */}
+          <Line
+            type="monotone"
+            dataKey="cumForecastLower"
+            name="Cum Forecast (lower)"
+            dot={false}
+            strokeWidth={1.5}
+            stroke={GREEN}
+            strokeDasharray="5 5"
+            isAnimationActive={false}
+          />
+          <Line
+            type="monotone"
+            dataKey="cumForecast"
+            name="Cum Forecast (mid)"
+            dot={false}
+            strokeWidth={2.5}
+            stroke={GREEN}
+            isAnimationActive={false}
+          />
+          <Line
+            type="monotone"
+            dataKey="cumForecastUpper"
+            name="Cum Forecast (upper)"
+            dot={false}
+            strokeWidth={1.5}
+            stroke={GREEN}
+            strokeDasharray="5 5"
+            isAnimationActive={false}
+          />
+
+          {/* Cum Actual in blue */}
           <Line
             type="monotone"
             dataKey="cumActual"
@@ -861,16 +973,9 @@ function CumulativeChart({ data }: { data: any[] }) {
             dot={false}
             strokeWidth={2}
             stroke={BLUE}
+            isAnimationActive={false}
           />
-          <Line
-            type="monotone"
-            dataKey="cumForecast"
-            name="Cum Forecast"
-            dot={false}
-            strokeWidth={2}
-            stroke={GREEN}
-          />
-        </LineChart>
+        </ComposedChart>
       </ResponsiveContainer>
     </div>
   );
