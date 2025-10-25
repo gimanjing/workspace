@@ -768,19 +768,48 @@ function DeptCombobox({
 /* =========================
    Graph Block
 ========================= */
+/* =========================
+   Graph Block (blue/green)
+========================= */
 function GraphBlock({ mode, data }: { mode: GraphMode; data: any[] }) {
+  // Tailwind palette picks:
+  // Blue  = #2563eb (blue-600)
+  // Green = #10b981 (emerald-500)
+  const BLUE  = "#2563eb";
+  const GREEN = "#10b981";
+
+  const ChartDefs = () => (
+    <defs>
+      {/* Blue gradient for Actual bars */}
+      <linearGradient id="barActualBlue" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%"  stopColor={BLUE}  stopOpacity={0.95} />
+        <stop offset="100%" stopColor={BLUE} stopOpacity={0.65} />
+      </linearGradient>
+      {/* Green gradient for Forecast bars */}
+      <linearGradient id="barForecastGreen" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%"  stopColor={GREEN} stopOpacity={0.90} />
+        <stop offset="100%" stopColor={GREEN} stopOpacity={0.60} />
+      </linearGradient>
+    </defs>
+  );
+
+  const Common = {
+    grid: <CartesianGrid strokeDasharray="3 3" opacity={0.25} />,
+    x: <XAxis dataKey="date" />,
+    y: <YAxis />,
+    tt: <Tooltip />,
+    lg: <Legend />,
+  };
+
   if (mode === "Daily Control") {
     return (
       <div className="h-[420px]">
         <ResponsiveContainer width="100%" height="100%">
           <BarChart data={data}>
-            <CartesianGrid strokeDasharray="3 3" />
-            <XAxis dataKey="date" />
-            <YAxis />
-            <Tooltip />
-            <Legend />
-            <Bar dataKey="actual" name="Actual" />
-            <Bar dataKey="forecast" name="Forecast" />
+            <ChartDefs />
+            {Common.grid}{Common.x}{Common.y}{Common.tt}{Common.lg}
+            <Bar dataKey="actual"   name="Actual"   radius={[6,6,0,0]} fill="url(#barActualBlue)" />
+            <Bar dataKey="forecast" name="Forecast" radius={[6,6,0,0]} fill="url(#barForecastGreen)" />
           </BarChart>
         </ResponsiveContainer>
       </div>
@@ -792,33 +821,32 @@ function GraphBlock({ mode, data }: { mode: GraphMode; data: any[] }) {
       <div className="h-[420px]">
         <ResponsiveContainer width="100%" height="100%">
           <LineChart data={data}>
-            <CartesianGrid strokeDasharray="3 3" />
-            <XAxis dataKey="date" />
-            <YAxis />
-            <Tooltip />
-            <Legend />
-            <Line type="monotone" dataKey="cumActual" name="Cum Actual" />
-            <Line type="monotone" dataKey="cumForecast" name="Cum Forecast" />
+            <ChartDefs />
+            {Common.grid}{Common.x}{Common.y}{Common.tt}{Common.lg}
+            <Line type="monotone" dataKey="cumActual"   name="Cum Actual"   dot={false} strokeWidth={2} stroke={BLUE}  />
+            <Line type="monotone" dataKey="cumForecast" name="Cum Forecast" dot={false} strokeWidth={2} stroke={GREEN} />
           </LineChart>
         </ResponsiveContainer>
       </div>
     );
   }
 
+  // Combination
   return (
     <div className="h-[460px]">
       <ResponsiveContainer width="100%" height="100%">
         <BarChart data={data}>
-          <CartesianGrid strokeDasharray="3 3" />
+          <ChartDefs />
+          <CartesianGrid strokeDasharray="3 3" opacity={0.25} />
           <XAxis dataKey="date" />
           <YAxis yAxisId="left" />
           <YAxis yAxisId="right" orientation="right" />
           <Tooltip />
           <Legend />
-          <Bar yAxisId="left" dataKey="actual" name="Actual (Daily)" />
-          <Bar yAxisId="left" dataKey="forecast" name="Forecast (Daily)" />
-          <Line yAxisId="right" type="monotone" dataKey="cumActual" name="Cum Actual" />
-          <Line yAxisId="right" type="monotone" dataKey="cumForecast" name="Cum Forecast" />
+          <Bar  yAxisId="left"  dataKey="actual"      name="Actual (Daily)"   radius={[6,6,0,0]} fill="url(#barActualBlue)" />
+          <Bar  yAxisId="left"  dataKey="forecast"    name="Forecast (Daily)" radius={[6,6,0,0]} fill="url(#barForecastGreen)" />
+          <Line yAxisId="right" type="monotone" dataKey="cumActual"   name="Cum Actual"   dot={false} strokeWidth={2} stroke={BLUE}  />
+          <Line yAxisId="right" type="monotone" dataKey="cumForecast" name="Cum Forecast" dot={false} strokeWidth={2} stroke={GREEN} />
         </BarChart>
       </ResponsiveContainer>
     </div>
