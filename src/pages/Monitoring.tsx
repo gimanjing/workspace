@@ -108,6 +108,8 @@ function normalizeCategory(raw: string | null | undefined): "Direct Material" | 
 }
 const fmtIDR = (n: number) =>
   new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR", maximumFractionDigits: 0 }).format(n);
+const fmtIDRCompact = (n: number) =>
+  new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(n);
 
 /* =========================
    Page
@@ -351,7 +353,7 @@ export default function Actual() {
 
   /* =========================
      GRAPH AGGREGATION
-  ========================= */
+========================= */
   const graphModeDates = useMemo(() => listMonthDates(filters.year, filters.month), [filters.year, filters.month]);
 
   const weights = useMemo(() => {
@@ -404,7 +406,7 @@ export default function Actual() {
 
   /* =========================
      UI
-  ========================= */
+========================= */
   return (
     <div className="min-h-dvh grid grid-cols-[260px_1fr]">
       <aside className="border-r bg-white dark:bg-slate-900 sticky top-0 h-dvh overflow-y-auto">
@@ -752,6 +754,9 @@ function GraphBlock({ mode, data }: { mode: GraphMode; data: any[] }) {
     );
   };
 
+  // Compact currency for Y-axis ticks
+  const yTick = (v: number) => fmtIDRCompact(v);
+
   if (mode === "Daily Control") {
     return (
       <div className="h-[420px]">
@@ -759,7 +764,7 @@ function GraphBlock({ mode, data }: { mode: GraphMode; data: any[] }) {
           <BarChart data={data}>
             <CartesianGrid strokeDasharray="3 3" opacity={0.25} />
             <XAxis dataKey="date" />
-            <YAxis />
+            <YAxis tickFormatter={yTick} />
             <Tooltip content={<ChartTooltip />} />
             <Legend />
             <Bar dataKey="actual"   name="Actual"   fill={BLUE}  stroke={BLUE}  radius={[6,6,0,0]} />
@@ -777,7 +782,7 @@ function GraphBlock({ mode, data }: { mode: GraphMode; data: any[] }) {
           <LineChart data={data}>
             <CartesianGrid strokeDasharray="3 3" opacity={0.25} />
             <XAxis dataKey="date" />
-            <YAxis />
+            <YAxis tickFormatter={yTick} />
             <Tooltip content={<ChartTooltip />} />
             <Legend />
             <Line type="monotone" dataKey="cumActual"   name="Cum Actual"   dot={false} strokeWidth={2} stroke={BLUE}  />
@@ -795,8 +800,8 @@ function GraphBlock({ mode, data }: { mode: GraphMode; data: any[] }) {
         <BarChart data={data}>
           <CartesianGrid strokeDasharray="3 3" opacity={0.25} />
           <XAxis dataKey="date" />
-          <YAxis yAxisId="left" />
-          <YAxis yAxisId="right" orientation="right" />
+          <YAxis yAxisId="left" tickFormatter={yTick} />
+          <YAxis yAxisId="right" orientation="right" tickFormatter={yTick} />
           <Tooltip content={<ChartTooltip />} />
           <Legend />
           <Bar  yAxisId="left"  dataKey="actual"      name="Actual"            fill={BLUE}  stroke={BLUE}  radius={[6,6,0,0]} />

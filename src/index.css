@@ -4,6 +4,10 @@
 
 @layer base {
   :root {
+    --chart-1: 221 83% 53%; /* blue-600  → Actual */
+    --chart-2: 160 84% 39%; /* emerald-500 → Forecast */
+    --chart-3: 262 83% 58%; /* optional extras */
+    --chart-4: 346 77% 49%;
     --background: 0 0% 100%;
     --foreground: 222.2 84% 4.9%;
 
@@ -52,6 +56,10 @@
   }
 
   .dark {
+    --chart-1: 221 83% 53%; /* blue-600  → Actual */
+    --chart-2: 160 84% 39%; /* emerald-500 → Forecast */
+    --chart-3: 262 83% 58%; /* optional extras */
+    --chart-4: 346 77% 49%;
     --background: 222.2 84% 4.9%;
     --foreground: 210 40% 98%;
 
