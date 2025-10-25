@@ -1,7 +1,7 @@
 // app/actual/page.tsx
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Navigation } from "@/components/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
@@ -13,7 +13,7 @@ import { CalendarDays, ChevronsUpDown, Check, Eye, EyeOff } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { supabase } from "@/lib/supabase";
 
-// shadcn table (adjust path if your project uses a different export path)
+// shadcn table
 import {
   Table,
   TableBody,
@@ -35,10 +35,16 @@ import {
 /* =========================
    Types
 ========================= */
-interface ShopRow { dept: string | null; loc: number | null }
-interface MasterRow { no_mat: string; price: number; quantity: number; category: string | null }
+interface MasterRow {
+  no_mat: string;
+  price: number;          // master.Price
+  quantity: number;       // master.qty
+  category: string | null;
+  mat_name?: string | null;
+  uom?: string | null;
+}
 interface ActualRow { no_mat: string; posting_date: string; quantity: number; dept: string | null }
-interface ForecastRow { no_mat: string; shop: string | null; quantity: number }
+interface ForecastRow { no_mat: string; shop: string | null; quantity: number; month?: string | null }
 
 type DeptMode = "all" | "list" | "unassigned";
 type MaterialOpt = "all" | "Direct Material" | "Indirect Material" | "Unassigned";
@@ -69,7 +75,7 @@ const MONTHS = [
 const fmtDate = (d: Date) => d.toISOString().slice(0, 10); // YYYY-MM-DD
 function monthRange(year: number, month: number) {
   const start = new Date(Date.UTC(year, month - 1, 1));
-  const end = new Date(Date.UTC(year, month, 0));
+  const end = new Date(Date.UTC(year, month, 0)); // last day
   return { start, end };
 }
 function listMonthDates(year: number, month: number): string[] {
@@ -82,10 +88,11 @@ function listMonthDates(year: number, month: number): string[] {
   }
   return days;
 }
-// Normalize odd date strings like "20225-09-01" or "20250901" to "YYYY-MM-DD"
+// Normalize odd date strings to "YYYY-MM-DD"
 function normalizeDateString(x: any): string | null {
   if (!x) return null;
   const s = String(x);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s; // already ISO date
   const m = s.match(/(\d{4,5})-(\d{2})-(\d{2})/);
   if (m) {
     const yyyy = m[1].slice(-4);
@@ -104,6 +111,12 @@ function normalizeDateString(x: any): string | null {
 function safeNumber(n: any, d = 0) {
   const x = Number(n);
   return Number.isFinite(x) ? x : d;
+}
+function normalizeCategory(raw: string | null | undefined): "Direct Material" | "Indirect Material" | "Unassigned" {
+  const s = (raw ?? "").trim().toLowerCase();
+  if (["direct", "direct material", "dm"].includes(s)) return "Direct Material";
+  if (["indirect", "indirect material", "im"].includes(s)) return "Indirect Material";
+  return "Unassigned";
 }
 
 /* =========================
@@ -145,21 +158,25 @@ export default function Actual() {
     let cancel = false;
     (async () => {
       const [{ data: m }, { data: s }] = await Promise.all([
-        supabase.from("master").select("no_mat, price, quantity, category"),
+        supabase.from("master").select("no_mat, Price, qty, category, mat_name, UoM"),
         supabase.from("shop").select("dept, loc"),
       ]);
       if (cancel) return;
+
       const mm: Record<string, MasterRow> = {};
       (m ?? []).forEach((r: any) => {
         if (!r.no_mat) return;
         mm[String(r.no_mat)] = {
           no_mat: String(r.no_mat),
-          price: safeNumber(r.price),
-          quantity: Math.max(1, safeNumber(r.quantity, 1)),
+          price: safeNumber(r.Price),
+          quantity: Math.max(1, safeNumber(r.qty, 1)),
           category: r.category ?? null,
+          mat_name: r.mat_name ?? null,
+          uom: r.UoM ?? null,
         };
       });
       setMasterMap(mm);
+
       const sm: Record<string, number> = {};
       (s ?? []).forEach((r: any) => {
         const dept = (r.dept ?? "").trim();
@@ -226,33 +243,48 @@ export default function Actual() {
     let cancel = false;
     (async () => {
       const { start, end } = monthRange(filters.year, filters.month);
-      const startStr = fmtDate(start);
-      const endStr = fmtDate(end);
+      const startStr = fmtDate(start);               // e.g., 2025-09-01
+      const endStr = fmtDate(end);                   // e.g., 2025-09-30
+      const nextMonthStart = new Date(Date.UTC(filters.year, filters.month, 1));
+      const nextStartStr = fmtDate(nextMonthStart);  // e.g., 2025-10-01
 
       const qa = supabase.from("actual")
         .select("no_mat, posting_date, quantity, dept")
-        .gte("posting_date", startStr).lte("posting_date", endStr);
+        .gte("posting_date", startStr)
+        .lte("posting_date", endStr);
 
-      const qf = supabase.from("forecast").select("no_mat, shop, quantity");
+      const qf = supabase.from("forecast")
+        .select("no_mat, shop, usage, month")
+        .gte("month", startStr)
+        .lt("month", nextStartStr);
 
-      const [{ data: a }, { data: f }] = await Promise.all([qa, qf]);
+      const [{ data: a, error: ea }, { data: f, error: ef }] = await Promise.all([qa, qf]);
       if (cancel) return;
 
-      setActualRows((a ?? []).map((r: any) => {
-        const d = normalizeDateString(r.posting_date);
-        return {
-          no_mat: String(r.no_mat),
-          posting_date: d ?? "",
-          quantity: safeNumber(r.quantity),
-          dept: r.dept ?? null,
-        };
-      }).filter(r => !!r.posting_date));
+      if (!ea && a) {
+        setActualRows(a.map((r: any) => {
+          const d = normalizeDateString(r.posting_date);
+          return {
+            no_mat: String(r.no_mat),
+            posting_date: d ?? "",
+            quantity: safeNumber(r.quantity),
+            dept: r.dept ?? null,
+          };
+        }).filter(r => !!r.posting_date));
+      } else {
+        setActualRows([]);
+      }
 
-      setForecastRows((f ?? []).map((r: any) => ({
-        no_mat: String(r.no_mat),
-        shop: r.shop ?? null,
-        quantity: safeNumber(r.quantity),
-      })));
+      if (!ef && f) {
+        setForecastRows(f.map((r: any) => ({
+          no_mat: String(r.no_mat),
+          shop: r.shop ?? null,
+          quantity: safeNumber(r.usage),   // usage → quantity
+          month: normalizeDateString(r.month) ?? null,
+        })));
+      } else {
+        setForecastRows([]);
+      }
     })();
     return () => { cancel = true; };
   }, [filters.year, filters.month]);
@@ -262,32 +294,29 @@ export default function Actual() {
   ========================= */
   const deptSet = useMemo(() => new Set(deptOptions), [deptOptions]);
 
-  const isDeptAllowed = (rowDept: string | null, rowShop: string | null) => {
+  const isDeptAllowed = useCallback((rowDept: string | null, rowShop: string | null) => {
     if (filters.deptMode === "all") return true;
     if (filters.deptMode === "list") {
       const target = (filters.deptSelected ?? "").trim();
-      return (rowDept ? rowDept.trim() === target : false) || (rowShop ? rowShop.trim() === target : false);
+      return (rowDept?.trim() === target) || (rowShop?.trim() === target);
     }
-    // unassigned
+    // "unassigned": include empty/null or values not in shop.dept
     const v = (rowDept ?? rowShop ?? "").trim();
-    return v && !deptSet.has(v);
-  };
+    return v === "" || !deptSet.has(v);
+  }, [filters.deptMode, filters.deptSelected, deptSet]);
 
-  const isMaterialAllowed = (no_mat: string) => {
-    const m = masterMap[no_mat];
-    const cat = (m?.category ?? "").trim();
+  const isMaterialAllowed = useCallback((no_mat: string) => {
+    const norm = normalizeCategory(masterMap[no_mat]?.category);
     if (filters.material === "all") return true;
-    if (filters.material === "Unassigned") {
-      return !(cat === "Direct Material" || cat === "Indirect Material");
-    }
-    return cat === filters.material;
-  };
+    if (filters.material === "Unassigned") return norm === "Unassigned";
+    return norm === filters.material;
+  }, [filters.material, masterMap]);
 
-  const vpu = (no_mat: string) => {
+  const vpu = useCallback((no_mat: string) => {
     const m = masterMap[no_mat];
-    if (!m) return 0; // set to 1 temporarily if you want to see missing master items
+    if (!m) return 0;
     return safeNumber(m.price) / Math.max(1, safeNumber(m.quantity, 1));
-  };
+  }, [masterMap]);
 
   /* =========================
      DEBUGGING TABLE DATA
@@ -304,7 +333,7 @@ export default function Actual() {
       quantity: r.quantity,
       value: Number((r.quantity * vpu(r.no_mat)).toFixed(2)),
     }));
-  }, [actualRows, isDeptAllowed, isMaterialAllowed]);
+  }, [actualRows, isDeptAllowed, isMaterialAllowed, vpu]);
 
   const filteredForecast = useMemo(() => {
     return forecastRows.filter(r =>
@@ -317,7 +346,7 @@ export default function Actual() {
       quantity: r.quantity,
       value: Number((r.quantity * vpu(r.no_mat)).toFixed(2)),
     }));
-  }, [forecastRows, isDeptAllowed, isMaterialAllowed, shopMap]);
+  }, [forecastRows, isDeptAllowed, isMaterialAllowed, shopMap, vpu]);
 
   // Pagination state
   const [pageA, setPageA] = useState(1);
@@ -341,52 +370,56 @@ export default function Actual() {
   const pagesF = Math.max(1, Math.ceil(filteredForecast.length / pageSizeF));
 
   /* =========================
-     GRAPH AGGREGATION
+     GRAPH AGGREGATION (optimized)
   ========================= */
   const graphModeDates = useMemo(() => listMonthDates(filters.year, filters.month), [filters.year, filters.month]);
 
-  const graphData = useMemo(() => {
+  const weights = useMemo(() => {
     const dates = graphModeDates;
+    const w1 = dates.map(d => cal1[d] ?? 0);
+    const w2 = dates.map(d => cal2[d] ?? 0);
+    const s1 = w1.reduce((a, b) => a + b, 0) || 1;
+    const s2 = w2.reduce((a, b) => a + b, 0) || 1;
+    return {
+      dates,
+      w1: w1.map(x => x / s1),
+      w2: w2.map(x => x / s2),
+    };
+  }, [graphModeDates, cal1, cal2]);
 
-    // Actual per day
-    const actualByDate: Record<string, number> = {};
-    for (const d of dates) actualByDate[d] = 0;
-    filteredActual.forEach(r => {
-      if (r.posting_date in actualByDate) {
-        actualByDate[r.posting_date] += r.value;
-      }
-    });
+  const graphData = useMemo(() => {
+    const { dates, w1, w2 } = weights;
 
-    // Forecast per day via calendar
-    const forecastByDate: Record<string, number> = {};
-    for (const d of dates) forecastByDate[d] = 0;
+    // Actual per day by index
+    const actualByIdx = new Array(dates.length).fill(0);
+    for (const r of filteredActual) {
+      const idx = dates.indexOf(r.posting_date);
+      if (idx >= 0) actualByIdx[idx] += r.value;
+    }
 
-    filteredForecast.forEach(r => {
-      const loc = r.loc === 2 ? 2 : 1;
-      const cal = loc === 2 ? cal2 : cal1;
-      const total = loc === 2 ? cal2Total : cal1Total;
-      const denom = total > 0 ? total : 1;
-      dates.forEach(d => {
-        const weight = cal[d] ?? 0;
-        forecastByDate[d] += r.value * (weight / denom);
-      });
-    });
+    // Forecast per day using precomputed weights
+    const forecastByIdx = new Array(dates.length).fill(0);
+    for (const r of filteredForecast) {
+      const arr = (r.loc === 2) ? w2 : w1;
+      const add = r.value;
+      for (let i = 0; i < arr.length; i++) forecastByIdx[i] += add * arr[i];
+    }
 
-    // Rows + cumulative
     let cumA = 0, cumF = 0;
-    return dates.map(d => {
-      const a = actualByDate[d] || 0;
-      const f = forecastByDate[d] || 0;
-      cumA += a; cumF += f;
+    return dates.map((iso, i) => {
+      const a = +actualByIdx[i].toFixed(2);
+      const f = +forecastByIdx[i].toFixed(2);
+      cumA = +(cumA + a).toFixed(2);
+      cumF = +(cumF + f).toFixed(2);
       return {
-        date: d.slice(8, 10),
-        actual: Number(a.toFixed(2)),
-        forecast: Number(f.toFixed(2)),
-        cumActual: Number(cumA.toFixed(2)),
-        cumForecast: Number(cumF.toFixed(2)),
+        date: iso.slice(8, 10),
+        actual: a,
+        forecast: f,
+        cumActual: cumA,
+        cumForecast: cumF,
       };
     });
-  }, [graphModeDates, filteredActual, filteredForecast, cal1, cal2, cal1Total, cal2Total]);
+  }, [weights, filteredActual, filteredForecast]);
 
   /* =========================
      UI
@@ -460,7 +493,7 @@ export default function Actual() {
                           </div>
                         </div>
                       </div>
-                      <div className="rounded-lg border overflow-auto max-h-[360px]">
+                      <div className="rounded-lg border overflow-auto max-h=[360px] lg:max-h-[360px]">
                         <Table>
                           <TableHeader>
                             <TableRow>
@@ -472,8 +505,8 @@ export default function Actual() {
                             </TableRow>
                           </TableHeader>
                           <TableBody>
-                            {pagedForecast.map((r, idx) => (
-                              <TableRow key={idx}>
+                            {pagedForecast.map((r) => (
+                              <TableRow key={`${r.shop ?? "NA"}:${r.no_mat}`}>
                                 <TableCell>{r.shop}</TableCell>
                                 <TableCell>{r.loc}</TableCell>
                                 <TableCell className="font-mono">{r.no_mat}</TableCell>
@@ -514,7 +547,7 @@ export default function Actual() {
                           </div>
                         </div>
                       </div>
-                      <div className="rounded-lg border overflow-auto max-h-[360px]">
+                      <div className="rounded-lg border overflow-auto max-h=[360px] lg:max-h-[360px]">
                         <Table>
                           <TableHeader>
                             <TableRow>
@@ -526,8 +559,8 @@ export default function Actual() {
                             </TableRow>
                           </TableHeader>
                           <TableBody>
-                            {pagedActual.map((r, idx) => (
-                              <TableRow key={idx}>
+                            {pagedActual.map((r) => (
+                              <TableRow key={`${r.posting_date}:${r.no_mat}`}>
                                 <TableCell className="font-mono">{r.posting_date}</TableCell>
                                 <TableCell>{r.dept}</TableCell>
                                 <TableCell className="font-mono">{r.no_mat}</TableCell>
@@ -594,7 +627,6 @@ function FiltersUI({
   deptOptions: string[];
 }) {
   const now = new Date();
-  const [deptOpen, setDeptOpen] = useState(false);
 
   return (
     <div className="grid gap-4 md:grid-cols-12">
@@ -654,7 +686,6 @@ function FiltersUI({
               value={filters.deptSelected}
               options={deptOptions}
               onSelect={(v) => setFilters(f => ({ ...f, deptSelected: v }))}
-              openState={[undefined as any, setDeptOpen]}
             />
           )}
         </div>
@@ -694,14 +725,12 @@ function DeptCombobox({
   value,
   options,
   onSelect,
-  openState,
 }: {
   value?: string;
   options: string[];
   onSelect: (v: string) => void;
-  openState?: [boolean | undefined, (o: boolean) => void];
 }) {
-  const [open, setOpen] = openState ?? useState(false);
+  const [open, setOpen] = useState(false);
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
