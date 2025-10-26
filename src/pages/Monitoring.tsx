@@ -36,7 +36,14 @@ interface MasterRow {
   mat_name?: string | null;
   uom?: string | null;
 }
-interface ActualRow { no_mat: string; posting_date: string; quantity: number; dept: string | null }
+interface ActualRow {
+  no_mat: string;
+  posting_date: string;
+  document_date?: string | null;   // ⬅️ add this
+  quantity: number;
+  dept: string | null;
+}
+
 interface ForecastRow { no_mat: string; shop: string | null; quantity: number; month?: string | null }
 
 type DeptMode = "all" | "list" | "unassigned";
@@ -242,9 +249,9 @@ export default function Actual() {
       const nextStartStr = fmtDate(nextMonthStart);
 
       const qa = supabase.from("actual")
-        .select("no_mat, posting_date, quantity, dept")
-        .gte("posting_date", startStr)
-        .lte("posting_date", endStr);
+  .select("no_mat, posting_date, document_date, quantity, dept")   // ⬅️ added document_date
+  .gte("posting_date", startStr)
+  .lte("posting_date", endStr);
 
       const qf = supabase.from("forecast")
         .select("no_mat, shop, usage, month")
@@ -255,14 +262,16 @@ export default function Actual() {
       if (cancel) return;
 
       setActualRows((a ?? []).map((r: any) => {
-        const d = normalizeDateString(r.posting_date);
-        return {
-          no_mat: String(r.no_mat),
-          posting_date: d ?? "",
-          quantity: safeNumber(r.quantity),
-          dept: r.dept ?? null,
-        };
-      }).filter(r => !!r.posting_date));
+  const d = normalizeDateString(r.posting_date);
+  const doc = normalizeDateString(r.document_date);
+  return {
+    no_mat: String(r.no_mat),
+    posting_date: d ?? "",
+    document_date: doc ?? null,
+    quantity: safeNumber(r.quantity),
+    dept: r.dept ?? null,
+  };
+}).filter(r => !!r.posting_date));
 
       setForecastRows((f ?? []).map((r: any) => ({
         no_mat: String(r.no_mat),
@@ -449,6 +458,86 @@ export default function Actual() {
 
   const sumA = useMemo(() => graphData.reduce((s, r) => s + r.actual, 0), [graphData]);
   const sumF = useMemo(() => graphData.reduce((s, r) => s + r.forecast, 0), [graphData]);
+/* =========================
+   Month totals per dept+material (values in IDR)
+========================= */
+const monthTotalsByDeptMat = useMemo(() => {
+  // key: `${dept}|${no_mat}`
+  const agg = new Map<string, {
+    dept: string;
+    no_mat: string;
+    mat_name: string;
+    forecastValue: number;
+    actualValue: number;
+  }>();
+
+  // Forecast: quantity is monthly usage (units) per shop (dept)
+  for (const r of filteredForecast) {
+    const dept = (r.shop ?? "").trim() || "—";
+    const key = `${dept}|${r.no_mat}`;
+    const unitPrice = vpu(r.no_mat);
+    const cur = agg.get(key) ?? { dept, no_mat: r.no_mat, mat_name: masterMap[r.no_mat]?.mat_name ?? "", forecastValue: 0, actualValue: 0 };
+    cur.forecastValue += r.quantity * unitPrice;
+    agg.set(key, cur);
+  }
+
+  // Actual: sum all rows per dept+no_mat this month
+  for (const r of filteredActual) {
+    const dept = (r.dept ?? "").trim() || "—";
+    const key = `${dept}|${r.no_mat}`;
+    const unitPrice = vpu(r.no_mat);
+    const cur = agg.get(key) ?? { dept, no_mat: r.no_mat, mat_name: masterMap[r.no_mat]?.mat_name ?? "", forecastValue: 0, actualValue: 0 };
+    cur.actualValue += r.quantity * unitPrice;
+    agg.set(key, cur);
+  }
+
+  return agg;
+}, [filteredForecast, filteredActual, masterMap, vpu]);
+
+/* =========================
+   Over / Under tables (rank by |A-F|)
+========================= */
+const overUsageRows = useMemo(() => {
+  const rows: { dept: string; no_mat: string; mat_name: string; diff: number }[] = [];
+  for (const [, v] of monthTotalsByDeptMat) {
+    const diff = +(v.actualValue - v.forecastValue).toFixed(2);
+    if (diff > 0) rows.push({ dept: v.dept, no_mat: v.no_mat, mat_name: v.mat_name, diff });
+  }
+  return rows.sort((a, b) => b.diff - a.diff);
+}, [monthTotalsByDeptMat]);
+
+const underUsageRows = useMemo(() => {
+  const rows: { dept: string; no_mat: string; mat_name: string; diff: number }[] = [];
+  for (const [, v] of monthTotalsByDeptMat) {
+    const diff = +((v.forecastValue - v.actualValue)).toFixed(2);
+    if (diff > 0) rows.push({ dept: v.dept, no_mat: v.no_mat, mat_name: v.mat_name, diff });
+  }
+  return rows.sort((a, b) => b.diff - a.diff);
+}, [monthTotalsByDeptMat]);
+
+/* =========================
+   Delay transactions (posting_date < document_date)
+========================= */
+const delayedTransactions = useMemo(() => {
+  const out: { no_mat: string; mat_name: string; shop: string; quantity: number; delayedDays: number }[] = [];
+  for (const r of actualRows) {
+    if (!r.document_date) continue;
+    const post = new Date(r.posting_date);
+    const doc  = new Date(r.document_date);
+    if (post.getTime() < doc.getTime()) {
+      const ms = doc.getTime() - post.getTime();
+      const days = Math.ceil(ms / (1000*60*60*24));
+      out.push({
+        no_mat: r.no_mat,
+        mat_name: masterMap[r.no_mat]?.mat_name ?? "",
+        shop: (r.dept ?? "").trim() || "—",
+        quantity: r.quantity,
+        delayedDays: days,
+      });
+    }
+  }
+  return out.sort((a, b) => b.delayedDays - a.delayedDays);
+}, [actualRows, masterMap]);
 
   /* =========================
      UI
@@ -645,6 +734,28 @@ export default function Actual() {
                 <div className="text-xs text-muted-foreground">
                   days: {graphData.length} • sumA: {fmtIDR(sumA)} • sumF: {fmtIDR(sumF)}
                 </div>
+                {/* === Anomaly block: 3 tables side-by-side === */}
+<AnomalyTables
+  over={overUsageRows}
+  under={underUsageRows}
+  delays={delayedTransactions}
+/>
+
+{/* === Dept summary (toggle) === */}
+<DeptSummaryBlock
+  show={showDeptSummary}
+  setShow={setShowDeptSummary}
+  rows={deptSummary}
+/>
+
+{/* === Continuous Over/Under for last 3 months (toggle) === */}
+<ContinuousUsageBlock
+  show={showContinuous}
+  setShow={setShowContinuous}
+  over={continuousOver}
+  under={continuousUnder}
+/>
+
               </CardContent>
             </Card>
           </div>
@@ -982,6 +1093,401 @@ function CumulativeChart({ data }: { data: any[] }) {
           />
         </ComposedChart>
       </ResponsiveContainer>
+    </div>
+  );
+}
+/* =========================
+   Dept summary: Forecast vs Actual (IDR) + usage %
+========================= */
+const [showDeptSummary, setShowDeptSummary] = useState(false);
+
+const deptSummary = useMemo(() => {
+  const byDept = new Map<string, { dept: string; forecast: number; actual: number }>();
+  for (const [, v] of monthTotalsByDeptMat) {
+    const cur = byDept.get(v.dept) ?? { dept: v.dept, forecast: 0, actual: 0 };
+    cur.forecast += v.forecastValue;
+    cur.actual   += v.actualValue;
+    byDept.set(v.dept, cur);
+  }
+  return Array.from(byDept.values()).map(d => ({
+    ...d,
+    usagePct: d.forecast > 0 ? +( (d.actual / d.forecast) * 100 ).toFixed(2) : null
+  })).sort((a,b)=> (b.actual - b.forecast) - (a.actual - a.forecast));
+}, [monthTotalsByDeptMat]);
+/* =========================
+   Load last 3 months (2 months before + this month)
+========================= */
+const [actual3m, setActual3m] = useState<ActualRow[]>([]);
+const [forecast3m, setForecast3m] = useState<ForecastRow[]>([]);
+
+useEffect(() => {
+  let cancel = false;
+  (async () => {
+    // start = first day of (month - 2); end = last day of current month
+    const start3 = new Date(Date.UTC(filters.year, filters.month - 3, 1));
+    const nextMonthStart = new Date(Date.UTC(filters.year, filters.month, 1));
+    const end3 = new Date(nextMonthStart.getTime() - 24*60*60*1000); // last day of current month
+
+    const startStr = fmtDate(start3);
+    const endStr   = fmtDate(end3);
+    const nextStr  = fmtDate(nextMonthStart);
+
+    const qa3 = supabase.from("actual")
+      .select("no_mat, posting_date, document_date, quantity, dept")
+      .gte("posting_date", startStr)
+      .lte("posting_date", endStr);
+
+    const qf3 = supabase.from("forecast")
+      .select("no_mat, shop, usage, month")
+      .gte("month", startStr)
+      .lt("month", nextStr);
+
+    const [{ data: a3 }, { data: f3 }] = await Promise.all([qa3, qf3]);
+    if (cancel) return;
+
+    const mappedA = (a3 ?? []).map((r:any) => ({
+      no_mat: String(r.no_mat),
+      posting_date: normalizeDateString(r.posting_date) ?? "",
+      document_date: normalizeDateString(r.document_date) ?? null,
+      quantity: safeNumber(r.quantity),
+      dept: r.dept ?? null,
+    })).filter(r => !!r.posting_date);
+
+    const mappedF = (f3 ?? []).map((r:any) => ({
+      no_mat: String(r.no_mat),
+      shop: r.shop ?? null,
+      quantity: safeNumber(r.usage),
+      month: normalizeDateString(r.month) ?? null,
+    }));
+
+    setActual3m(mappedA);
+    setForecast3m(mappedF);
+  })();
+  return () => { cancel = true; };
+}, [filters.year, filters.month]);
+/* =========================
+   Continuous Over/Under (last 3 months by dept+material)
+========================= */
+const [showContinuous, setShowContinuous] = useState(false);
+
+// helper to year-month key
+const ymKey = (iso: string) => iso.slice(0, 7); // YYYY-MM
+
+const threeMonthKeys = useMemo(() => {
+  const ymCur = ymKey(fmtDate(new Date(Date.UTC(filters.year, filters.month - 1, 1))));
+  const d1 = new Date(Date.UTC(filters.year, filters.month - 2, 1));
+  const d2 = new Date(Date.UTC(filters.year, filters.month - 3, 1));
+  return [ymKey(fmtDate(d2)), ymKey(fmtDate(d1)), ymCur]; // [-2M, -1M, this]
+}, [filters.year, filters.month]);
+
+type DiffRec = {
+  dept: string;
+  no_mat: string;
+  mat_name: string;
+  diff1: number; // -2M (A-F)
+  diff2: number; // -1M
+  diff3: number; // this month
+  pct3m: number | null; // (sumA / sumF) * 100 over 3 months
+};
+
+const { continuousOver, continuousUnder } = useMemo(() => {
+  // Build forecast totals per (ym, dept, no_mat)
+  const fMap = new Map<string, number>(); // key: `${ym}|${dept}|${no_mat}` => value (IDR)
+  for (const r of forecast3m) {
+    const ym = r.month ? ymKey(r.month) : "";
+    if (!ym || !threeMonthKeys.includes(ym)) continue;
+    const dept = (r.shop ?? "").trim() || "—";
+    const key = `${ym}|${dept}|${r.no_mat}`;
+    const unitPrice = vpu(r.no_mat);
+    fMap.set(key, (fMap.get(key) ?? 0) + r.quantity * unitPrice);
+  }
+
+  // Build actual totals per (ym, dept, no_mat)
+  const aMap = new Map<string, number>();
+  for (const r of actual3m) {
+    const ym = ymKey(r.posting_date);
+    if (!threeMonthKeys.includes(ym)) continue;
+    const dept = (r.dept ?? "").trim() || "—";
+    const key = `${ym}|${dept}|${r.no_mat}`;
+    const unitPrice = vpu(r.no_mat);
+    aMap.set(key, (aMap.get(key) ?? 0) + r.quantity * unitPrice);
+  }
+
+  // Enumerate all (dept,no_mat) that appear in any of 3 months
+  const combos = new Map<string, { dept: string; no_mat: string }>();
+  const pushCombo = (ym:string, dept:string, no:string) => {
+    if (!threeMonthKeys.includes(ym)) return;
+    combos.set(`${dept}|${no}`, { dept, no_mat: no });
+  };
+  for (const k of fMap.keys()) { const [ym, dept, no] = k.split("|"); pushCombo(ym, dept, no); }
+  for (const k of aMap.keys()) { const [ym, dept, no] = k.split("|"); pushCombo(ym, dept, no); }
+
+  const over: DiffRec[] = [];
+  const under: DiffRec[] = [];
+
+  for (const { dept, no_mat } of combos.values()) {
+    const mat_name = masterMap[no_mat]?.mat_name ?? "";
+
+    const vals: number[] = [];
+    const sums = { A: 0, F: 0 };
+
+    threeMonthKeys.forEach((ym, i) => {
+      const key = `${ym}|${dept}|${no_mat}`;
+      const A = aMap.get(key) ?? 0;
+      const F = fMap.get(key) ?? 0;
+      vals[i] = +(A - F).toFixed(2);
+      sums.A += A; sums.F += F;
+    });
+
+    const rec: DiffRec = {
+      dept, no_mat, mat_name,
+      diff1: vals[0] ?? 0, // -2M
+      diff2: vals[1] ?? 0, // -1M
+      diff3: vals[2] ?? 0, // this M
+      pct3m: sums.F > 0 ? +((sums.A / sums.F) * 100).toFixed(2) : null
+    };
+
+    if (rec.diff1 > 0 && rec.diff2 > 0 && rec.diff3 > 0) over.push(rec);
+    if (rec.diff1 < 0 && rec.diff2 < 0 && rec.diff3 < 0) under.push(rec);
+  }
+
+  // Rank by current month magnitude, then by 3m percentage
+  over.sort((a,b)=> b.diff3 - a.diff3 || (b.pct3m ?? -1) - (a.pct3m ?? -1));
+  under.sort((a,b)=> Math.abs(b.diff3) - Math.abs(a.diff3) || (a.pct3m ?? -1) - (b.pct3m ?? -1));
+
+  return { continuousOver: over, continuousUnder: under };
+}, [forecast3m, actual3m, threeMonthKeys, masterMap, vpu]);
+/* =========================
+   UI: 3 anomalies tables (side-by-side)
+========================= */
+function AnomalyTables(props: {
+  over: { dept: string; no_mat: string; mat_name: string; diff: number }[];
+  under: { dept: string; no_mat: string; mat_name: string; diff: number }[];
+  delays: { no_mat: string; mat_name: string; shop: string; quantity: number; delayedDays: number }[];
+}) {
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+      {/* Over usage */}
+      <div className="rounded-xl border">
+        <div className="px-4 py-3 border-b text-sm font-medium">Over Usage (A &gt; F)</div>
+        <div className="max-h-[340px] overflow-auto">
+          <table className="w-full text-sm">
+            <thead className="sticky top-0 bg-background">
+              <tr className="[&>th]:text-left [&>th]:px-3 [&>th]:py-2">
+                <th>Dept</th><th>No Mat</th><th>Mat Name</th><th className="text-right">Δ IDR</th>
+              </tr>
+            </thead>
+            <tbody>
+              {props.over.map((r, i)=>(
+                <tr key={r.dept + r.no_mat + i} className="border-t">
+                  <td className="px-3 py-2 whitespace-nowrap">{r.dept}</td>
+                  <td className="px-3 py-2 font-mono">{r.no_mat}</td>
+                  <td className="px-3 py-2">{r.mat_name}</td>
+                  <td className="px-3 py-2 text-right tabular-nums">{fmtIDR(r.diff)}</td>
+                </tr>
+              ))}
+              {props.over.length === 0 && (
+                <tr><td colSpan={4} className="px-3 py-6 text-center text-muted-foreground">No over-usage</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Under usage */}
+      <div className="rounded-xl border">
+        <div className="px-4 py-3 border-b text-sm font-medium">Under Usage (A &lt; F)</div>
+        <div className="max-h-[340px] overflow-auto">
+          <table className="w-full text-sm">
+            <thead className="sticky top-0 bg-background">
+              <tr className="[&>th]:text-left [&>th]:px-3 [&>th]:py-2">
+                <th>Dept</th><th>No Mat</th><th>Mat Name</th><th className="text-right">Δ IDR</th>
+              </tr>
+            </thead>
+            <tbody>
+              {props.under.map((r, i)=>(
+                <tr key={r.dept + r.no_mat + i} className="border-t">
+                  <td className="px-3 py-2 whitespace-nowrap">{r.dept}</td>
+                  <td className="px-3 py-2 font-mono">{r.no_mat}</td>
+                  <td className="px-3 py-2">{r.mat_name}</td>
+                  <td className="px-3 py-2 text-right tabular-nums">{fmtIDR(r.diff)}</td>
+                </tr>
+              ))}
+              {props.under.length === 0 && (
+                <tr><td colSpan={4} className="px-3 py-6 text-center text-muted-foreground">No under-usage</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Delay transactions */}
+      <div className="rounded-xl border">
+        <div className="px-4 py-3 border-b text-sm font-medium">Delay Transactions (posting &lt; document)</div>
+        <div className="max-h-[340px] overflow-auto">
+          <table className="w-full text-sm">
+            <thead className="sticky top-0 bg-background">
+              <tr className="[&>th]:text-left [&>th]:px-3 [&>th]:py-2">
+                <th>No Mat</th><th>Mat Name</th><th>Shop</th><th className="text-right">Qty</th><th className="text-right">Days</th>
+              </tr>
+            </thead>
+            <tbody>
+              {props.delays.map((r, i)=>(
+                <tr key={r.no_mat + r.shop + i} className="border-t">
+                  <td className="px-3 py-2 font-mono">{r.no_mat}</td>
+                  <td className="px-3 py-2">{r.mat_name}</td>
+                  <td className="px-3 py-2 whitespace-nowrap">{r.shop}</td>
+                  <td className="px-3 py-2 text-right tabular-nums">{r.quantity}</td>
+                  <td className="px-3 py-2 text-right tabular-nums">{r.delayedDays}</td>
+                </tr>
+              ))}
+              {props.delays.length === 0 && (
+                <tr><td colSpan={5} className="px-3 py-6 text-center text-muted-foreground">No delayed postings</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* =========================
+   UI: Dept summary (toggle)
+========================= */
+function DeptSummaryBlock(props: {
+  show: boolean; setShow: (b:boolean)=>void;
+  rows: { dept: string; forecast: number; actual: number; usagePct: number | null }[];
+}) {
+  return (
+    <div className="rounded-xl border">
+      <div className="px-4 py-3 flex items-center justify-between border-b">
+        <div className="text-sm font-medium">Department Summary (Forecast vs Actual)</div>
+        <Button size="sm" variant="outline" onClick={()=>props.setShow(!props.show)}>
+          {props.show ? "Hide" : "Show"}
+        </Button>
+      </div>
+      {props.show && (
+        <div className="overflow-auto">
+          <table className="w-full text-sm">
+            <thead className="sticky top-0 bg-background">
+              <tr className="[&>th]:text-left [&>th]:px-3 [&>th]:py-2">
+                <th>Dept</th>
+                <th className="text-right">Forecast (IDR)</th>
+                <th className="text-right">Actual (IDR)</th>
+                <th className="text-right">Usage %</th>
+              </tr>
+            </thead>
+            <tbody>
+              {props.rows.map((r)=>(
+                <tr key={r.dept} className="border-t">
+                  <td className="px-3 py-2">{r.dept}</td>
+                  <td className="px-3 py-2 text-right tabular-nums">{fmtIDR(r.forecast)}</td>
+                  <td className="px-3 py-2 text-right tabular-nums">{fmtIDR(r.actual)}</td>
+                  <td className="px-3 py-2 text-right tabular-nums">
+                    {r.usagePct === null ? "—" : `${r.usagePct.toFixed(2)}%`}
+                  </td>
+                </tr>
+              ))}
+              {props.rows.length === 0 && (
+                <tr><td colSpan={4} className="px-3 py-6 text-center text-muted-foreground">No data</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* =========================
+   UI: Continuous Over/Under (toggle)
+========================= */
+function ContinuousUsageBlock(props: {
+  show: boolean; setShow: (b:boolean)=>void;
+  over: { dept: string; no_mat: string; mat_name: string; diff1: number; diff2: number; diff3: number; pct3m: number | null }[];
+  under:{ dept: string; no_mat: string; mat_name: string; diff1: number; diff2: number; diff3: number; pct3m: number | null }[];
+}) {
+  return (
+    <div className="rounded-xl border">
+      <div className="px-4 py-3 flex items-center justify-between border-b">
+        <div className="text-sm font-medium">Continuous Over / Continuous Under (last 3 months)</div>
+        <Button size="sm" variant="outline" onClick={()=>props.setShow(!props.show)}>
+          {props.show ? "Hide" : "Show"}
+        </Button>
+      </div>
+
+      {props.show && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 p-4 pt-3">
+          {/* Over */}
+          <div className="rounded-lg border">
+            <div className="px-3 py-2 border-b text-sm font-medium">Continuous Over</div>
+            <div className="max-h-[320px] overflow-auto">
+              <table className="w-full text-sm">
+                <thead className="sticky top-0 bg-background">
+                  <tr className="[&>th]:text-left [&>th]:px-3 [&>th]:py-2">
+                    <th>Dept</th><th>No Mat</th><th>Mat Name</th>
+                    <th className="text-right">Δ (-2M)</th>
+                    <th className="text-right">Δ (-1M)</th>
+                    <th className="text-right">Δ (This M)</th>
+                    <th className="text-right">Usage % (3M)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {props.over.map((r, i)=>(
+                    <tr key={r.dept + r.no_mat + i} className="border-t">
+                      <td className="px-3 py-2">{r.dept}</td>
+                      <td className="px-3 py-2 font-mono">{r.no_mat}</td>
+                      <td className="px-3 py-2">{r.mat_name}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{fmtIDR(r.diff1)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{fmtIDR(r.diff2)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{fmtIDR(r.diff3)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{r.pct3m === null ? "—" : `${r.pct3m.toFixed(2)}%`}</td>
+                    </tr>
+                  ))}
+                  {props.over.length === 0 && (
+                    <tr><td colSpan={7} className="px-3 py-6 text-center text-muted-foreground">No continuous over-usage</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Under */}
+          <div className="rounded-lg border">
+            <div className="px-3 py-2 border-b text-sm font-medium">Continuous Under</div>
+            <div className="max-h-[320px] overflow-auto">
+              <table className="w-full text-sm">
+                <thead className="sticky top-0 bg-background">
+                  <tr className="[&>th]:text-left [&>th]:px-3 [&>th]:py-2">
+                    <th>Dept</th><th>No Mat</th><th>Mat Name</th>
+                    <th className="text-right">Δ (-2M)</th>
+                    <th className="text-right">Δ (-1M)</th>
+                    <th className="text-right">Δ (This M)</th>
+                    <th className="text-right">Usage % (3M)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {props.under.map((r, i)=>(
+                    <tr key={r.dept + r.no_mat + i} className="border-t">
+                      <td className="px-3 py-2">{r.dept}</td>
+                      <td className="px-3 py-2 font-mono">{r.no_mat}</td>
+                      <td className="px-3 py-2">{r.mat_name}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{fmtIDR(r.diff1)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{fmtIDR(r.diff2)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{fmtIDR(r.diff3)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{r.pct3m === null ? "—" : `${r.pct3m.toFixed(2)}%`}</td>
+                    </tr>
+                  ))}
+                  {props.under.length === 0 && (
+                    <tr><td colSpan={7} className="px-3 py-6 text-center text-muted-foreground">No continuous under-usage</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
